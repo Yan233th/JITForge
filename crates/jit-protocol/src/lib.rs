@@ -6,6 +6,10 @@ pub mod worker {
     tonic::include_proto!("jitforge.worker.v1");
 }
 
+pub const MAX_INPUT_SAMPLES: usize = 8;
+pub const MAX_INPUT_SAMPLE_BYTES: usize = 256 * 1024;
+pub const MAX_INPUT_SAMPLES_TOTAL_BYTES: usize = 1024 * 1024;
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct HealthResponse {
     pub status: String,
@@ -60,6 +64,8 @@ pub struct RegistrationRequest {
     pub output_format: IoFormat,
     #[serde(default)]
     pub examples: Vec<ToolExample>,
+    #[serde(default)]
+    pub input_samples: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

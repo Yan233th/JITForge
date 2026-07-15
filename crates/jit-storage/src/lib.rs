@@ -150,14 +150,15 @@ impl Registry {
         let job_id = Uuid::now_v7();
         sqlx::query(
             "INSERT INTO synthesis_jobs
-             (id, tool_id, revision, idempotency_key, request_fingerprint, status, stage)
-             VALUES ($1, $2, $3, $4, $5, 'queued', 'queued')",
+             (id, tool_id, revision, idempotency_key, request_fingerprint, input_samples, status, stage)
+             VALUES ($1, $2, $3, $4, $5, $6, 'queued', 'queued')",
         )
         .bind(job_id)
         .bind(tool_id)
         .bind(revision)
         .bind(idempotency_key)
         .bind(fingerprint)
+        .bind(serde_json::to_value(&request.input_samples)?)
         .execute(&mut *transaction)
         .await?;
 
@@ -396,7 +397,7 @@ impl Registry {
 
         let row = sqlx::query(
             "SELECT j.id, j.tool_id, t.name, j.revision, j.attempts,
-                    v.description, v.input_format, v.output_format, v.examples,
+                    v.description, v.input_format, v.output_format, v.examples, j.input_samples,
                     ar.engine AS agent_engine, ar.engine_version AS agent_engine_version,
                     ar.checkpoint AS agent_checkpoint
              FROM synthesis_jobs j
@@ -409,6 +410,7 @@ impl Registry {
         .fetch_one(&mut *transaction)
         .await?;
         let examples: Value = row.try_get("examples")?;
+        let input_samples: Value = row.try_get("input_samples")?;
         let agent_engine: Option<String> = row.try_get("agent_engine")?;
         let agent_engine_version: Option<String> = row.try_get("agent_engine_version")?;
         let agent_checkpoint: Option<Value> = row.try_get("agent_checkpoint")?;
@@ -434,6 +436,7 @@ impl Registry {
             input_format: parse_io_format(row.try_get("input_format")?)?,
             output_format: parse_io_format(row.try_get("output_format")?)?,
             examples: serde_json::from_value(examples)?,
+            input_samples: serde_json::from_value(input_samples)?,
             attempts: row.try_get::<i32, _>("attempts")? as u32,
             agent_checkpoint,
         };
@@ -982,6 +985,7 @@ pub struct ClaimedSynthesisJob {
     pub input_format: IoFormat,
     pub output_format: IoFormat,
     pub examples: Vec<ToolExample>,
+    pub input_samples: Vec<String>,
     pub attempts: u32,
     pub agent_checkpoint: Option<AgentCheckpointRecord>,
 }
@@ -1124,6 +1128,7 @@ mod tests {
                 input: "Hello".to_owned(),
                 output: "hello".to_owned(),
             }],
+            input_samples: vec!["Hello from stdin\n".to_owned()],
         };
         let first = registration_fingerprint(&name, &request).unwrap();
         assert_eq!(first, registration_fingerprint(&name, &request).unwrap());

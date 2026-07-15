@@ -11,7 +11,8 @@ use clap::{Args, Parser, Subcommand};
 use jit_config::JitForgeConfig;
 use jit_protocol::{
     ErrorResponse, InvocationRequest, InvocationResponse, IoFormat, JobResponse, JobStatus,
-    RegistrationRequest, RegistrationResponse, ToolExample, ToolListResponse, ToolSummaryResponse,
+    MAX_INPUT_SAMPLE_BYTES, RegistrationRequest, RegistrationResponse, ToolExample,
+    ToolListResponse, ToolSummaryResponse,
 };
 use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -45,7 +46,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Register a new immutable candidate version.
+    /// Register a new immutable candidate version. Piped stdin is used as an input sample.
     Register {
         name: String,
         description: String,
@@ -198,6 +199,7 @@ async fn run(cli: &Cli) -> CliResult<i32> {
             no_wait,
             timeout,
         } => {
+            let input_samples = read_registration_input_samples()?;
             let request = RegistrationRequest {
                 description: description.clone(),
                 input_format: parse_io_format(input_format)?,
@@ -206,6 +208,7 @@ async fn run(cli: &Cli) -> CliResult<i32> {
                     .iter()
                     .map(|value| parse_example(value))
                     .collect::<CliResult<_>>()?,
+                input_samples,
             };
             let response = authenticated(
                 client
@@ -550,6 +553,39 @@ fn read_call_input(input: Option<&str>, file: Option<&PathBuf>) -> CliResult<Vec
     Ok(bytes)
 }
 
+fn read_registration_input_samples() -> CliResult<Vec<String>> {
+    if io::stdin().is_terminal() {
+        return Ok(Vec::new());
+    }
+    read_input_sample(io::stdin().lock())
+}
+
+fn read_input_sample(reader: impl Read) -> CliResult<Vec<String>> {
+    let mut bytes = Vec::new();
+    reader
+        .take((MAX_INPUT_SAMPLE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(CliFailure::io)?;
+    if bytes.len() > MAX_INPUT_SAMPLE_BYTES {
+        return Err(CliFailure::local(
+            64,
+            "input_sample_too_large",
+            "registration input sample exceeds the 256 KiB limit",
+        ));
+    }
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sample = String::from_utf8(bytes).map_err(|_| {
+        CliFailure::local(
+            64,
+            "invalid_input_sample",
+            "registration input sample must be UTF-8 text",
+        )
+    })?;
+    Ok(vec![sample])
+}
+
 async fn decode_response<T>(response: reqwest::Response) -> CliResult<T>
 where
     T: DeserializeOwned,
@@ -777,6 +813,25 @@ mod tests {
         let example = parse_example("a => b => c").unwrap();
         assert_eq!(example.input, "a");
         assert_eq!(example.output, "b => c");
+    }
+
+    #[test]
+    fn reads_piped_registration_input_as_an_unpaired_sample() {
+        let samples = read_input_sample("Architecture: x86_64\n".as_bytes()).unwrap();
+        assert_eq!(samples, vec!["Architecture: x86_64\n"]);
+    }
+
+    #[test]
+    fn rejects_oversized_registration_input_samples() {
+        let sample = vec![b'x'; MAX_INPUT_SAMPLE_BYTES + 1];
+        let failure = read_input_sample(sample.as_slice()).unwrap_err();
+        assert_eq!(failure.code, "input_sample_too_large");
+    }
+
+    #[test]
+    fn rejects_non_utf8_registration_input_samples() {
+        let failure = read_input_sample([0xff].as_slice()).unwrap_err();
+        assert_eq!(failure.code, "invalid_input_sample");
     }
 
     #[test]

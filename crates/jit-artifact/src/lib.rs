@@ -41,6 +41,10 @@ pub struct ToolTestCase {
 pub struct ValidationSummary {
     pub tests_total: usize,
     pub tests_passed: usize,
+    #[serde(default)]
+    pub input_samples_total: usize,
+    #[serde(default)]
+    pub input_samples_passed: usize,
     pub repair_rounds: u32,
     #[serde(default)]
     pub agent_turns: u32,
@@ -365,6 +369,8 @@ mod tests {
         ValidationSummary {
             tests_total: 1,
             tests_passed: 1,
+            input_samples_total: 0,
+            input_samples_passed: 0,
             repair_rounds: 0,
             agent_turns: 1,
             generated_test_corrections: 0,

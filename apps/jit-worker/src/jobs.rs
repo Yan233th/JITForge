@@ -527,15 +527,27 @@ impl JobProcessor {
         self.registry
             .set_job_stage(job.job_id, &self.worker_id, JobStage::Validating)
             .await?;
-        match validate_tests(
+        let validation = match validate_input_samples(
             &self.runner,
             &artifact.digest,
             job.output_format,
-            &draft.tests,
-            draft.user_test_count,
+            &job.input_samples,
         )
         .await
         {
+            Ok(()) => {
+                validate_tests(
+                    &self.runner,
+                    &artifact.digest,
+                    job.output_format,
+                    &draft.tests,
+                    draft.user_test_count,
+                )
+                .await
+            }
+            Err(failure) => Err(failure),
+        };
+        match validation {
             Ok(()) => {
                 workspace.latest_failure = None;
                 self.publish(job, &artifact).await?;
@@ -570,6 +582,8 @@ impl JobProcessor {
             ValidationSummary {
                 tests_total,
                 tests_passed: tests_total,
+                input_samples_total: job.input_samples.len(),
+                input_samples_passed: job.input_samples.len(),
                 repair_rounds: metrics.source_revisions.saturating_sub(1),
                 agent_turns: metrics.turns,
                 generated_test_corrections: metrics.generated_test_corrections,
@@ -778,6 +792,7 @@ fn load_or_create_run(
         "description": job.description,
         "input_format": job.input_format,
         "output_format": job.output_format,
+        "input_samples_without_expected_output": job.input_samples,
         "immutable_user_examples": job.examples
     }))?);
     let run = AgentRun::new(prompt)
@@ -1117,6 +1132,58 @@ async fn validate_tests(
     Ok(())
 }
 
+async fn validate_input_samples(
+    runner: &DockerRunner,
+    digest: &str,
+    output_format: IoFormat,
+    samples: &[String],
+) -> Result<(), ValidationFailureSnapshot> {
+    for (index, sample) in samples.iter().enumerate() {
+        let name = format!("input-sample-{}", index + 1);
+        let output = match runner
+            .execute(digest, &[], sample.as_bytes(), Duration::from_secs(5))
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                return Err(ValidationFailureSnapshot {
+                    test_name: name,
+                    test_origin: TestOrigin::InputSample,
+                    diagnostic: format!("input sample runner error: {error}"),
+                    actual_stdout: String::new(),
+                    actual_stderr: String::new(),
+                    actual_exit_code: None,
+                });
+            }
+        };
+        let diagnostic = if output.exit_code != 0 {
+            Some(format!(
+                "input sample must execute successfully, but exited with {}",
+                output.exit_code
+            ))
+        } else if output_format == IoFormat::Json {
+            serde_json::from_slice::<Value>(&output.stdout)
+                .err()
+                .map(|error| format!("input sample returned invalid JSON: {error}"))
+        } else {
+            std::str::from_utf8(&output.stdout)
+                .err()
+                .map(|error| format!("input sample returned non-UTF-8 text: {error}"))
+        };
+        if let Some(diagnostic) = diagnostic {
+            return Err(ValidationFailureSnapshot {
+                test_name: name,
+                test_origin: TestOrigin::InputSample,
+                diagnostic,
+                actual_stdout: diagnostic_bytes(&output.stdout),
+                actual_stderr: diagnostic_bytes(&output.stderr),
+                actual_exit_code: Some(output.exit_code),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_stdout(
     output_format: IoFormat,
     test: &ToolTestCase,
@@ -1294,6 +1361,7 @@ mod tests {
             input_format: IoFormat::Text,
             output_format: IoFormat::Text,
             examples: vec![],
+            input_samples: vec![],
             attempts: 1,
             agent_checkpoint: None,
         }
@@ -1358,6 +1426,25 @@ mod tests {
         .unwrap();
         assert_eq!(draft.user_test_count, 1);
         assert_eq!(draft.tests[0].name, "user-example-1");
+    }
+
+    #[test]
+    fn synthesis_prompt_distinguishes_samples_from_paired_examples() {
+        let mut job = claimed_job();
+        job.input_samples = vec!["Architecture: x86_64\n".to_owned()];
+        job.examples = vec![jit_protocol::ToolExample {
+            input: "input".to_owned(),
+            output: "output".to_owned(),
+        }];
+        let (mut run, _, resumed) = load_or_create_run(&job).unwrap();
+        assert!(!resumed);
+        let AgentRunStep::CallModel { prompt, .. } = run.next_step().unwrap() else {
+            panic!("new agent run should call the model");
+        };
+        let encoded = serde_json::to_string(&prompt).unwrap();
+        assert!(encoded.contains("input_samples_without_expected_output"));
+        assert!(encoded.contains("Architecture: x86_64"));
+        assert!(encoded.contains("immutable_user_examples"));
     }
 
     #[test]

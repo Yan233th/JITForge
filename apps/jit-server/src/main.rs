@@ -14,8 +14,8 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use jit_config::{JitForgeConfig, nonempty_env};
 use jit_domain::{ToolDescription, ToolName};
 use jit_protocol::{
-    ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, ReadyResponse,
-    RegistrationRequest,
+    ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, MAX_INPUT_SAMPLE_BYTES,
+    MAX_INPUT_SAMPLES, MAX_INPUT_SAMPLES_TOTAL_BYTES, ReadyResponse, RegistrationRequest,
     worker::{ExecuteRequest, runner_client::RunnerClient},
 };
 use jit_storage::{Registry, StorageError};
@@ -186,6 +186,31 @@ async fn register_tool(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if request.examples.len() > 32 {
         return Err(ApiError::bad_request("at most 32 examples are allowed"));
+    }
+    if request.input_samples.len() > MAX_INPUT_SAMPLES {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_INPUT_SAMPLES} input samples are allowed"
+        )));
+    }
+    if request
+        .input_samples
+        .iter()
+        .any(|sample| sample.len() > MAX_INPUT_SAMPLE_BYTES)
+        || request.input_samples.iter().map(String::len).sum::<usize>()
+            > MAX_INPUT_SAMPLES_TOTAL_BYTES
+    {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "input_samples_too_large",
+            "input samples must be at most 256 KiB each and 1 MiB in total",
+        ));
+    }
+    if request.input_format == jit_protocol::IoFormat::Json {
+        for sample in &request.input_samples {
+            serde_json::from_str::<serde_json::Value>(sample).map_err(|error| {
+                ApiError::bad_request(format!("input sample is not valid JSON: {error}"))
+            })?;
+        }
     }
     let idempotency_key = headers
         .get(IDEMPOTENCY_KEY_HEADER)
