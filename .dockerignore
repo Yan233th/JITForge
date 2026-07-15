@@ -1,0 +1,15 @@
+target/*
+!target/release/
+target/release/*
+!target/release/jit-server
+!target/release/jit-worker
+.git/
+.data/
+.env
+*.log
+docs/
+README.md
+compose.yaml
+.github/
+runtimes/
+deployments/

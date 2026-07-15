@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: jitforge
+      POSTGRES_USER: jitforge
+      POSTGRES_PASSWORD: jitforge
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jitforge -d jitforge"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  runtime-image:
+    image: jitforge/python-stdlib-v1:0.1.0
+    build:
+      context: ./runtimes/python-stdlib-v1
+    command: ["python3", "-c", "print('jitforge runtime ready')"]
+
+  worker:
+    profiles: ["containerized"]
+    image: jitforge/worker:0.1.0
+    build:
+      context: .
+      dockerfile: deployments/compose/Dockerfile
+      target: worker
+    environment:
+      JITFORGE_DATABASE_URL: postgres://jitforge:jitforge@postgres:5432/jitforge
+      JITFORGE_WORKER_LISTEN_ADDR: 0.0.0.0:50051
+      JITFORGE_WORKER_TOKEN: ${JITFORGE_WORKER_TOKEN:-}
+      JITFORGE_ARTIFACT_DIR: /var/lib/jitforge/artifacts
+      JITFORGE_DOCKER_RUNTIME: runsc
+      JITFORGE_SYNTHESIZER_MODE: ${JITFORGE_SYNTHESIZER_MODE:-openai}
+      JITFORGE_LLM_BASE_URL: ${JITFORGE_LLM_BASE_URL:-}
+      JITFORGE_LLM_API_KEY: ${JITFORGE_LLM_API_KEY:-}
+      JITFORGE_LLM_MODEL: ${JITFORGE_LLM_MODEL:-}
+      JITFORGE_LLM_VERIFIER_MODEL: ${JITFORGE_LLM_VERIFIER_MODEL:-}
+      JITFORGE_LLM_THINKING: ${JITFORGE_LLM_THINKING:-auto}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      runtime-image:
+        condition: service_completed_successfully
+    expose:
+      - "50051"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - artifact-data:/var/lib/jitforge/artifacts
+
+  server:
+    profiles: ["containerized"]
+    image: jitforge/server:0.1.0
+    build:
+      context: .
+      dockerfile: deployments/compose/Dockerfile
+      target: server
+    environment:
+      JITFORGE_LISTEN_ADDR: 0.0.0.0:8080
+      JITFORGE_DATABASE_URL: postgres://jitforge:jitforge@postgres:5432/jitforge
+      JITFORGE_TOKEN: ${JITFORGE_TOKEN:-}
+      JITFORGE_WORKER_ENDPOINT: http://worker:50051
+      JITFORGE_WORKER_TOKEN: ${JITFORGE_WORKER_TOKEN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres-data:
+  artifact-data:
