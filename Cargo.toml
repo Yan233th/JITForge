@@ -47,7 +47,7 @@ tower-http = { version = "0.6.6", features = ["request-id", "trace"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 ulid = "1.2.1"
-uuid = { version = "1.17.0", features = ["serde", "v7"] }
+uuid = { version = "1.17.0", features = ["serde", "v4", "v7"] }
 
 # This project is developed on small machines and does not need multi-gigabyte
 # DWARF output for normal checks. Set CARGO_PROFILE_DEV_DEBUG=1 temporarily

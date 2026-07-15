@@ -1,3 +1,5 @@
+mod web;
+
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
@@ -5,18 +7,20 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Path, Query, Request, State},
-    http::{HeaderMap, HeaderName, StatusCode},
+    http::{HeaderMap, HeaderName, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use jit_artifact::{ArtifactError, ArtifactStore};
 use jit_config::{JitForgeConfig, nonempty_env};
 use jit_domain::{ToolIntent, ToolName};
 use jit_protocol::{
-    ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, MAX_INPUT_SAMPLE_BYTES,
-    MAX_INPUT_SAMPLES, MAX_INPUT_SAMPLES_TOTAL_BYTES, ReadyResponse, RegistrationRequest,
-    RevokeRequest,
+    ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, JobStatus,
+    MAX_INPUT_SAMPLE_BYTES, MAX_INPUT_SAMPLES, MAX_INPUT_SAMPLES_TOTAL_BYTES, ReadyResponse,
+    RegistrationRequest, RevokeRequest, ToolArtifactManifest, ToolArtifactResponse,
+    ToolArtifactTestCase,
     worker::{ExecuteRequest, runner_client::RunnerClient},
 };
 use jit_storage::{Registry, StorageError};
@@ -43,9 +47,11 @@ const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
 #[derive(Clone)]
 struct AppState {
     registry: Registry,
+    artifact_store: ArtifactStore,
     auth_token: String,
     worker: RunnerClient<Channel>,
     worker_token: String,
+    sessions: web::SessionStore,
 }
 
 #[derive(Debug)]
@@ -55,6 +61,7 @@ struct Config {
     auth_token: String,
     worker_endpoint: String,
     worker_token: String,
+    artifact_dir: String,
 }
 
 #[tokio::main]
@@ -74,9 +81,11 @@ async fn main() -> Result<()> {
         .connect_lazy();
     let app = build_router(AppState {
         registry,
+        artifact_store: ArtifactStore::new(&config.artifact_dir),
         auth_token: config.auth_token,
         worker: RunnerClient::new(worker_channel),
         worker_token: config.worker_token,
+        sessions: web::SessionStore::default(),
     });
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
@@ -109,6 +118,8 @@ impl Config {
             worker_endpoint: configured("JITFORGE_WORKER_ENDPOINT", config.server.worker_endpoint)
                 .unwrap_or_else(|| "http://127.0.0.1:50051".to_owned()),
             worker_token,
+            artifact_dir: configured("JITFORGE_ARTIFACT_DIR", config.server.artifact_dir)
+                .unwrap_or_else(|| ".data/artifacts".to_owned()),
         })
     }
 }
@@ -125,17 +136,34 @@ fn build_router(state: AppState) -> Router {
     let protected = Router::new()
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", get(inspect_tool))
+        .route("/v1/tools/{name}/versions", get(list_tool_versions))
+        .route(
+            "/v1/tools/{name}/versions/{revision}/artifact",
+            get(get_tool_artifact),
+        )
         .route("/v1/tools/{name}/registrations", post(register_tool))
         .route(
             "/v1/tools/{name}/versions/{revision}/revoke",
             post(revoke_tool_version),
         )
         .route("/v1/tools/{name}/invocations", post(invoke_tool))
+        .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{job_id}", get(get_job))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let request_id_header = HeaderName::from_static("x-request-id");
     Router::new()
+        .route("/", get(web::root))
+        .route("/ui", get(web::root))
+        .route("/ui/", get(web::index))
+        .route("/ui/app.css", get(web::css))
+        .route("/ui/app.js", get(web::js))
+        .route(
+            "/v1/session",
+            get(web::current_session)
+                .post(web::login)
+                .delete(web::logout),
+        )
         .route("/healthz", get(health))
         .route("/readyz", get(ready))
         .merge(protected)
@@ -275,6 +303,35 @@ async fn get_job(
 }
 
 #[derive(Debug, Default, Deserialize)]
+struct ListJobsQuery {
+    status: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+async fn list_jobs(
+    State(state): State<AppState>,
+    Query(query): Query<ListJobsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let (limit, offset) = validated_page(query.limit, query.offset)?;
+    let status = query
+        .status
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            JobStatus::parse(value)
+                .ok_or_else(|| ApiError::bad_request(format!("unknown job status {value:?}")))
+        })
+        .transpose()?;
+    let response = state
+        .registry
+        .list_jobs(status, limit, offset)
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct ListToolsQuery {
     #[serde(default)]
     query: String,
@@ -328,6 +385,89 @@ async fn inspect_tool(
         .await
         .map_err(ApiError::from_storage)?;
     Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PageQuery {
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+async fn list_tool_versions(
+    State(state): State<AppState>,
+    Path(raw_name): Path<String>,
+    Query(query): Query<PageQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let name = raw_name
+        .parse::<ToolName>()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let (limit, offset) = validated_page(query.limit, query.offset)?;
+    let response = state
+        .registry
+        .list_tool_versions(&name, limit, offset)
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(Json(response))
+}
+
+async fn get_tool_artifact(
+    State(state): State<AppState>,
+    Path((raw_name, revision)): Path<(String, u64)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let name = raw_name
+        .parse::<ToolName>()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if revision == 0 {
+        return Err(ApiError::bad_request("tool revision must be positive"));
+    }
+    let digest = state
+        .registry
+        .artifact_digest_for_version(&name, revision)
+        .await
+        .map_err(ApiError::from_storage)?;
+    let store = state.artifact_store.clone();
+    let lookup_digest = digest.clone();
+    let artifact = tokio::task::spawn_blocking(move || store.load(&lookup_digest))
+        .await
+        .map_err(|error| ApiError::internal(format!("artifact task failed: {error}")))?
+        .map_err(ApiError::from_artifact)?;
+    let bundle = artifact.bundle;
+    Ok(Json(ToolArtifactResponse {
+        tool: name.to_string(),
+        revision,
+        digest,
+        manifest: ToolArtifactManifest {
+            format_version: bundle.manifest.format_version,
+            runtime: bundle.manifest.runtime,
+            input_format: bundle.manifest.input_format,
+            output_format: bundle.manifest.output_format,
+            source_sha256: bundle.manifest.source_sha256,
+        },
+        source: bundle.source,
+        tests: bundle
+            .tests
+            .into_iter()
+            .map(|test| ToolArtifactTestCase {
+                name: test.name,
+                args: test.args,
+                stdin: test.stdin,
+                expected_stdout: test.expected_stdout,
+                expected_exit_code: test.expected_exit_code,
+            })
+            .collect(),
+    }))
+}
+
+fn validated_page(limit: Option<u32>, offset: Option<u64>) -> Result<(u32, u64), ApiError> {
+    let limit = limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request("limit must be between 1 and 100"));
+    }
+    let offset = offset.unwrap_or(0);
+    if offset > i64::MAX as u64 {
+        return Err(ApiError::bad_request("offset is too large"));
+    }
+    Ok((limit, offset))
 }
 
 async fn invoke_tool(
@@ -484,18 +624,33 @@ async fn require_auth(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let authorized = supplied
+    let bearer_authorized = supplied
         .map(|token| constant_time_eq(token.as_bytes(), state.auth_token.as_bytes()))
         .unwrap_or(false);
-    if !authorized {
+    if bearer_authorized {
+        return next.run(request).await;
+    }
+    if let Some(session) = web::session_from_headers(&state.sessions, request.headers()) {
+        let safe_method = matches!(
+            *request.method(),
+            Method::GET | Method::HEAD | Method::OPTIONS
+        );
+        if safe_method || web::csrf_matches(&session, request.headers()) {
+            return next.run(request).await;
+        }
         return ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "a valid bearer token is required",
+            StatusCode::FORBIDDEN,
+            "csrf_failed",
+            "a valid CSRF token is required",
         )
         .into_response();
     }
-    next.run(request).await
+    ApiError::new(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "a valid bearer token or browser session is required",
+    )
+    .into_response()
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
@@ -518,6 +673,10 @@ impl ApiError {
 
     fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     }
 
     fn from_storage(error: StorageError) -> Self {
@@ -550,6 +709,11 @@ impl ApiError {
                 "tool_not_ready",
                 "the selected tool version has not completed synthesis and validation",
             ),
+            StorageError::ArtifactNotFound => Self::new(
+                StatusCode::NOT_FOUND,
+                "artifact_not_found",
+                "tool version has no published artifact",
+            ),
             other => {
                 error!(error = %other, "registry operation failed");
                 Self::new(
@@ -557,6 +721,22 @@ impl ApiError {
                     "internal_error",
                     "the registry operation failed",
                 )
+            }
+        }
+    }
+
+    fn from_artifact(error: ArtifactError) -> Self {
+        match error {
+            ArtifactError::Io(ref source) if source.kind() == std::io::ErrorKind::NotFound => {
+                Self::new(
+                    StatusCode::NOT_FOUND,
+                    "artifact_not_found",
+                    "published artifact is not available",
+                )
+            }
+            other => {
+                error!(error = %other, "artifact lookup failed");
+                Self::internal("failed to load the published artifact")
             }
         }
     }
@@ -602,5 +782,13 @@ mod tests {
         assert_eq!(error.body.code, "invalid_request");
         assert!(error.body.request_id.starts_with("req_"));
         assert_eq!(error.body.details, None);
+    }
+
+    #[test]
+    fn pagination_limits_are_bounded() {
+        assert_eq!(validated_page(None, None).unwrap(), (50, 0));
+        assert!(validated_page(Some(0), None).is_err());
+        assert!(validated_page(Some(101), None).is_err());
+        assert!(validated_page(Some(50), Some(i64::MAX as u64 + 1)).is_err());
     }
 }

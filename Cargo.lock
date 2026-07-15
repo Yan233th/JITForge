@@ -1340,6 +1340,8 @@ dependencies = [
  "anyhow",
  "axum 0.8.9",
  "base64",
+ "chrono",
+ "jit-artifact",
  "jit-config",
  "jit-domain",
  "jit-protocol",

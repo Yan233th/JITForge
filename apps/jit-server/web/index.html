@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JITForge Console</title>
+  <link rel="stylesheet" href="/ui/app.css">
+</head>
+<body>
+  <section id="login-view" class="login-layout">
+    <div class="login-card">
+      <div class="brand-mark">JF</div>
+      <p class="eyebrow">JITFORGE CONSOLE</p>
+      <h1>即时工具，集中管理</h1>
+      <p class="muted">使用配置中的共享访问令牌登录。令牌只用于本次登录，不会保存在浏览器存储中。</p>
+      <form id="login-form" class="stack">
+        <label>访问令牌<input id="login-token" type="password" autocomplete="current-password" required></label>
+        <button type="submit" class="primary">登录</button>
+      </form>
+      <p id="login-error" class="error" role="alert"></p>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app-shell hidden">
+    <aside class="sidebar">
+      <a class="brand" href="#/tools"><span class="brand-mark small">JF</span><span>JITForge</span></a>
+      <nav>
+        <a href="#/tools" data-nav="tools">工具</a>
+        <a href="#/register" data-nav="register">注册工具</a>
+        <a href="#/jobs" data-nav="jobs">合成任务</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div id="ready-badge" class="health-badge">检查服务中</div>
+        <button id="logout-button" class="ghost">退出登录</button>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div>
+          <p id="page-eyebrow" class="eyebrow">JITFORGE</p>
+          <h1 id="page-title">工具</h1>
+        </div>
+        <a href="#/register" class="button primary">注册新工具</a>
+      </header>
+      <section id="view" class="view" aria-live="polite"></section>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="/ui/app.js" defer></script>
+</body>
+</html>

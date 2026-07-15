@@ -3,9 +3,9 @@ use std::{collections::HashSet, str::FromStr, time::Duration};
 use chrono::{DateTime, Utc};
 use jit_domain::{ToolName, ToolVersionStatus};
 use jit_protocol::{
-    IoFormat, JobError, JobResponse, JobStage, JobStatus, RegistrationRequest,
+    IoFormat, JobError, JobListResponse, JobResponse, JobStage, JobStatus, RegistrationRequest,
     RegistrationResponse, RevokeResponse, ToolExample, ToolListItem, ToolListResponse,
-    ToolSummaryResponse, ToolVersionSummary,
+    ToolSummaryResponse, ToolVersionListItem, ToolVersionListResponse, ToolVersionSummary,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -188,6 +188,46 @@ impl Registry {
         map_job(row)
     }
 
+    pub async fn list_jobs(
+        &self,
+        status: Option<JobStatus>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<JobListResponse, StorageError> {
+        let row_limit = i64::from(limit)
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Invariant("job list limit overflow".to_owned()))?;
+        let offset = i64::try_from(offset).map_err(|_| {
+            StorageError::Invariant("job list offset exceeds PostgreSQL BIGINT".to_owned())
+        })?;
+        let mut rows = sqlx::query(
+            "SELECT j.id, t.name, j.revision, j.status AS job_status, j.stage,
+                    v.status AS version_status, j.error_code, j.error_message, j.details,
+                    j.created_at, j.updated_at
+             FROM synthesis_jobs j
+             JOIN tools t ON t.id = j.tool_id
+             JOIN tool_versions v ON v.tool_id = j.tool_id AND v.revision = j.revision
+             WHERE ($1::text IS NULL OR j.status = $1)
+             ORDER BY j.created_at DESC, j.id DESC
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(status.map(JobStatus::as_str))
+        .bind(row_limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        let jobs = rows
+            .into_iter()
+            .map(map_job)
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        Ok(JobListResponse {
+            jobs,
+            next_offset: next_offset(has_more, offset, limit),
+        })
+    }
+
     pub async fn list_tools(
         &self,
         query: &str,
@@ -329,6 +369,101 @@ impl Registry {
                 error,
             },
         })
+    }
+
+    pub async fn list_tool_versions(
+        &self,
+        name: &ToolName,
+        limit: u32,
+        offset: u64,
+    ) -> Result<ToolVersionListResponse, StorageError> {
+        let tool =
+            sqlx::query("SELECT id, latest_revision, stable_revision FROM tools WHERE name = $1")
+                .bind(name.as_str())
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or(StorageError::ToolNotFound)?;
+        let tool_id: Uuid = tool.try_get("id")?;
+        let latest_revision = to_u64(tool.try_get("latest_revision")?, "latest_revision")?;
+        let stable_revision = tool
+            .try_get::<Option<i64>, _>("stable_revision")?
+            .map(|value| to_u64(value, "stable_revision"))
+            .transpose()?;
+        let row_limit = i64::from(limit)
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Invariant("version list limit overflow".to_owned()))?;
+        let offset = i64::try_from(offset).map_err(|_| {
+            StorageError::Invariant("version list offset exceeds PostgreSQL BIGINT".to_owned())
+        })?;
+        let mut rows = sqlx::query(
+            "SELECT revision, description, status, input_format, output_format,
+                    artifact_digest, error_code, error_message, created_at, updated_at
+             FROM tool_versions WHERE tool_id = $1
+             ORDER BY revision DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(tool_id)
+        .bind(row_limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        let versions = rows
+            .into_iter()
+            .map(|row| {
+                let error_code: Option<String> = row.try_get("error_code")?;
+                let error_message: Option<String> = row.try_get("error_message")?;
+                let error = match (error_code, error_message) {
+                    (Some(code), Some(message)) => Some(JobError {
+                        code,
+                        message,
+                        details: None,
+                    }),
+                    _ => None,
+                };
+                let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
+                Ok(ToolVersionListItem {
+                    revision: to_u64(row.try_get("revision")?, "revision")?,
+                    description: row.try_get("description")?,
+                    status: parse_version_status(row.try_get("status")?)?,
+                    input_format: parse_io_format(row.try_get("input_format")?)?,
+                    output_format: parse_io_format(row.try_get("output_format")?)?,
+                    artifact_digest: row.try_get("artifact_digest")?,
+                    error,
+                    created_at: created_at.to_rfc3339(),
+                    updated_at: updated_at.to_rfc3339(),
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        Ok(ToolVersionListResponse {
+            tool: name.to_string(),
+            stable_revision,
+            latest_revision,
+            versions,
+            next_offset: next_offset(has_more, offset, limit),
+        })
+    }
+
+    pub async fn artifact_digest_for_version(
+        &self,
+        name: &ToolName,
+        revision: u64,
+    ) -> Result<String, StorageError> {
+        let revision = i64::try_from(revision).map_err(|_| StorageError::VersionNotFound)?;
+        let row = sqlx::query(
+            "SELECT v.artifact_digest
+             FROM tools t
+             JOIN tool_versions v ON v.tool_id = t.id
+             WHERE t.name = $1 AND v.revision = $2",
+        )
+        .bind(name.as_str())
+        .bind(revision)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::VersionNotFound)?;
+        row.try_get::<Option<String>, _>("artifact_digest")?
+            .ok_or(StorageError::ArtifactNotFound)
     }
 
     pub async fn revoke_tool_version(
@@ -1099,6 +1234,16 @@ pub fn registration_fingerprint(
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn next_offset(has_more: bool, offset: i64, limit: u32) -> Option<u64> {
+    has_more
+        .then(|| {
+            u64::try_from(offset)
+                .ok()
+                .and_then(|offset| offset.checked_add(u64::from(limit)))
+        })
+        .flatten()
+}
+
 fn map_job(row: sqlx::postgres::PgRow) -> Result<JobResponse, StorageError> {
     let error_code: Option<String> = row.try_get("error_code")?;
     let error_message: Option<String> = row.try_get("error_message")?;
@@ -1169,6 +1314,9 @@ pub enum StorageError {
 
     #[error("tool has no ready version")]
     ToolNotReady,
+
+    #[error("tool version has no published artifact")]
+    ArtifactNotFound,
 
     #[error("synthesis job lease was lost")]
     JobLeaseLost,

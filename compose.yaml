@@ -75,14 +75,16 @@ services:
       JITFORGE_TOKEN: ${JITFORGE_TOKEN-}
       JITFORGE_WORKER_ENDPOINT: http://worker:50051
       JITFORGE_WORKER_TOKEN: ${JITFORGE_WORKER_TOKEN-}
+      JITFORGE_ARTIFACT_DIR: /var/lib/jitforge/artifacts
     depends_on:
       postgres:
         condition: service_healthy
       worker:
         condition: service_started
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     volumes:
+      - artifact-data:/var/lib/jitforge/artifacts:ro
       - type: bind
         source: ${JITFORGE_SERVER_CONFIG_FILE:-/dev/null}
         target: /etc/jitforge/config.toml

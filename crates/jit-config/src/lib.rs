@@ -37,6 +37,7 @@ pub struct ServerConfig {
     pub listen_addr: Option<String>,
     pub database_url: Option<String>,
     pub worker_endpoint: Option<String>,
+    pub artifact_dir: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -177,6 +178,9 @@ mod tests {
             [client]
             server = "http://localhost:8080"
 
+            [server]
+            artifact_dir = ".data/artifacts"
+
             [llm]
             model = "coder"
             "#,
@@ -188,6 +192,10 @@ mod tests {
             Some("http://localhost:8080")
         );
         assert_eq!(config.llm.model.as_deref(), Some("coder"));
+        assert_eq!(
+            config.server.artifact_dir.as_deref(),
+            Some(".data/artifacts")
+        );
         assert!(toml::from_str::<JitForgeConfig>("unknown = true").is_err());
     }
 

@@ -82,6 +82,17 @@ pub struct RevokeResponse {
     pub stable_revision: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionLoginRequest {
+    pub token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SessionResponse {
+    pub csrf_token: String,
+    pub expires_at: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
@@ -229,6 +240,66 @@ pub struct ToolListResponse {
     pub tools: Vec<ToolListItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolVersionListItem {
+    pub revision: u64,
+    pub description: String,
+    pub status: ToolVersionStatus,
+    pub input_format: IoFormat,
+    pub output_format: IoFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JobError>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolVersionListResponse {
+    pub tool: String,
+    pub stable_revision: Option<u64>,
+    pub latest_revision: u64,
+    pub versions: Vec<ToolVersionListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JobListResponse {
+    pub jobs: Vec<JobResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolArtifactManifest {
+    pub format_version: u32,
+    pub runtime: String,
+    pub input_format: IoFormat,
+    pub output_format: IoFormat,
+    pub source_sha256: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolArtifactTestCase {
+    pub name: String,
+    pub args: Vec<String>,
+    pub stdin: String,
+    pub expected_stdout: String,
+    pub expected_exit_code: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolArtifactResponse {
+    pub tool: String,
+    pub revision: u64,
+    pub digest: String,
+    pub manifest: ToolArtifactManifest,
+    pub source: String,
+    pub tests: Vec<ToolArtifactTestCase>,
 }
 
 #[cfg(test)]
