@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrf: null, expiresAt: null, pollTimer: null };
+const state = { csrf: null, expiresAt: null, pollTimer: null, toolsController: null, searchTimer: null };
 const $ = (selector) => document.querySelector(selector);
 
 function element(tag, options = {}, children = []) {
@@ -115,6 +115,8 @@ function errorView(error) {
 async function route() {
   if (!state.csrf) return;
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
+  if (state.toolsController) state.toolsController.abort();
+  if (state.searchTimer) window.clearTimeout(state.searchTimer);
   const view = $("#view");
   clear(view);
   const hash = location.hash || "#/tools";
@@ -138,15 +140,56 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
   const form = element("form", { className: "toolbar" }, [
     searchInput,
     element("label", { className: "inline-check" }, [include, document.createTextNode("包含未就绪/已撤销")]),
-    element("button", { className: "primary", text: "搜索", type: "submit" })
+    element("button", { className: "primary compact-button", text: "搜索", type: "submit" })
   ]);
-  form.addEventListener("submit", (event) => {
-    event.preventDefault();
-    clear(view);
-    renderTools(view, 0, searchInput.value.trim(), include.checked).catch((error) => view.append(errorView(error)));
+  const resultMeta = element("span", { className: "panel-meta", text: "加载中" });
+  const results = element("div", { className: "results-region" }, loadingRows());
+  const toolPanel = panel("能力列表", [form, results], resultMeta);
+  const jobsRegion = element("div", { className: "results-region" }, loadingRows(3));
+  view.append(toolPanel, panel("最近合成任务", jobsRegion));
+
+  const load = async (nextOffset = 0) => {
+    if (state.toolsController) state.toolsController.abort();
+    const controller = new AbortController();
+    state.toolsController = controller;
+    const parameters = new URLSearchParams({ query: searchInput.value.trim(), include_unready: String(include.checked), limit: "50", offset: String(nextOffset) });
+    results.classList.add("updating");
+    resultMeta.textContent = "正在更新…";
+    try {
+      const tools = await api(`/v1/tools?${parameters}`, { signal: controller.signal });
+      if (state.toolsController !== controller) return;
+      resultMeta.textContent = `${tools.tools.length} 个结果`;
+      clear(results);
+      results.append(renderToolsResult(tools, nextOffset, () => load(Math.max(0, nextOffset - 50)), (value) => load(value)));
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        clear(results); results.append(errorView(error)); resultMeta.textContent = "加载失败";
+      }
+    } finally {
+      if (state.toolsController === controller) {
+        results.classList.remove("updating");
+        state.toolsController = null;
+      }
+    }
+  };
+
+  form.addEventListener("submit", (event) => { event.preventDefault(); load(0); });
+  searchInput.addEventListener("input", () => {
+    if (state.searchTimer) window.clearTimeout(state.searchTimer);
+    state.searchTimer = window.setTimeout(() => load(0), 280);
   });
-  const parameters = new URLSearchParams({ query: search, include_unready: String(includeUnready), limit: "50", offset: String(offset) });
-  const [tools, jobs] = await Promise.all([api(`/v1/tools?${parameters}`), api("/v1/jobs?limit=8&offset=0")]);
+  include.addEventListener("change", () => load(0));
+  load(offset);
+  try {
+    const jobs = await api("/v1/jobs?limit=8&offset=0");
+    clear(jobsRegion); jobsRegion.append(jobsTable(jobs.jobs));
+  } catch (error) {
+    clear(jobsRegion); jobsRegion.append(errorView(error));
+  }
+}
+
+function renderToolsResult(tools, offset, previousPage, nextPage) {
+  if (!tools.tools.length) return element("div", { className: "empty", text: "没有匹配的工具" });
   const table = element("table");
   table.append(tableHead(["工具", "状态", "稳定版本", "最新版本", "格式", "能力描述"]));
   const body = element("tbody");
@@ -158,7 +201,7 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
       element("td", { text: tool.stable_revision ?? "—" }),
       element("td", { text: tool.latest_revision }),
       element("td", { text: `${tool.input_format} → ${tool.output_format}` }),
-      element("td", { text: tool.description })
+      element("td", { className: "description-column" }, element("div", { className: "description-cell", text: tool.description }))
     );
     row.addEventListener("click", () => { location.hash = `#/tools/${encodeURIComponent(tool.tool)}`; });
     body.append(row);
@@ -167,17 +210,21 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
   const pager = element("div", { className: "form-actions" });
   if (offset > 0) {
     const previous = element("button", { className: "ghost", text: "上一页", type: "button" });
-    previous.addEventListener("click", () => { clear(view); renderTools(view, Math.max(0, offset - 50), search, includeUnready); });
+    previous.addEventListener("click", previousPage);
     pager.append(previous);
   }
   if (tools.next_offset !== undefined) {
     const next = element("button", { className: "ghost", text: "下一页", type: "button" });
-    next.addEventListener("click", () => { clear(view); renderTools(view, tools.next_offset, search, includeUnready); });
+    next.addEventListener("click", () => nextPage(tools.next_offset));
     pager.append(next);
   }
-  const toolContent = tools.tools.length ? [form, element("div", { className: "table-wrap" }, table), pager] : [form, element("div", { className: "empty", text: "没有匹配的工具" })];
-  view.append(panel(`能力列表 · ${tools.tools.length}`, toolContent));
-  view.append(panel("最近合成任务", jobsTable(jobs.jobs)));
+  return element("div", {}, [element("div", { className: "table-wrap" }, table), pager]);
+}
+
+function loadingRows(count = 5) {
+  const container = element("div", { className: "loading-list" });
+  for (let index = 0; index < count; index += 1) container.append(element("div", { className: "loading-row" }));
+  return container;
 }
 
 function tableHead(labels) {
@@ -201,7 +248,7 @@ function jobsTable(jobs) {
       element("td", {}, badge(job.version_status)),
       element("td", { text: statusText(job.stage) }),
       element("td", { text: formatTime(job.updated_at) }),
-      element("td", { text: job.error?.message || "—" })
+      element("td", { className: "description-column" }, element("div", { className: "description-cell", text: job.error?.message || "—" }))
     );
     row.addEventListener("click", () => { location.hash = `#/jobs/${job.job_id}`; });
     body.append(row);
@@ -304,7 +351,7 @@ function versionsTable(name, response) {
       element("td", { text: version.revision }), element("td", {}, badge(version.status)),
       element("td", { text: response.stable_revision === version.revision ? "是" : "" }),
       element("td", { text: `${version.input_format} → ${version.output_format}` }),
-      element("td", { text: formatTime(version.updated_at) }), element("td", { text: version.description })
+      element("td", { text: formatTime(version.updated_at) }), element("td", { className: "description-column" }, element("div", { className: "description-cell", text: version.description }))
     );
     row.addEventListener("click", () => { location.hash = `#/tools/${encodeURIComponent(name)}@${version.revision}`; });
     body.append(row);
@@ -410,7 +457,7 @@ function renderRegister(view) {
     element("label", {}, [document.createTextNode("工具名称"), name]), element("label", {}, [document.createTextNode("用户 Intent"), intent]), formats,
     element("div", { className: "notice", text: "注意：Input Sample 会进入模型上下文与 Agent Trace。不要提交密钥或敏感生产数据。" }),
     element("label", {}, [document.createTextNode("Input Sample（可选）"), sample]), element("label", {}, [document.createTextNode("从文本文件读取样本"), sampleFile]),
-    element("div", { className: "panel-header" }, [element("h3", { text: "严格 Examples" }), addExample]), examples,
+    element("div", { className: "section-heading" }, [element("h3", { text: "严格 Examples" }), addExample]), examples,
     element("div", { className: "form-actions" }, element("button", { className: "primary", text: "开始合成", type: "submit" }))
   );
   form.addEventListener("submit", async (event) => {
