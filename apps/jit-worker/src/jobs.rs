@@ -19,9 +19,9 @@ use tracing::{error, info, warn};
 use crate::{
     runner::{DockerRunner, RunnerError},
     synthesizer::{
-        AGENT_SYSTEM_PROMPT, FixtureContext, ModelRequest, SynthesisDraft, SynthesisError,
-        Synthesizer, TestOrigin, TestVerdictKind, TestVerificationRequest,
-        ValidationFailureSnapshot, validate_reason, validate_source,
+        AGENT_SYSTEM_PROMPT, ContractReviewDecision, ContractReviewRequest, FixtureContext,
+        ModelRequest, SynthesisDraft, SynthesisError, Synthesizer, TestOrigin, TestVerdictKind,
+        TestVerificationRequest, ValidationFailureSnapshot, validate_reason, validate_source,
     },
 };
 
@@ -297,6 +297,51 @@ impl JobProcessor {
                 let args: SubmitContractArgs = parse_args(arguments)?;
                 validate_reason(&args.reason)?;
                 let draft = validate_contract(args, job)?;
+                let review_request = ContractReviewRequest {
+                    name: job.tool.clone(),
+                    intent: job.intent.clone(),
+                    input_format: job.input_format,
+                    output_format: job.output_format,
+                    input_samples_without_expected_output: job.input_samples.clone(),
+                    immutable_user_examples: job.examples.clone(),
+                    proposed_contract: draft.contract.clone(),
+                    proposed_generated_tests: draft.tests[draft.user_test_count..].to_vec(),
+                };
+                self.event(
+                    job,
+                    "contract_review_request",
+                    json!({
+                        "contract": &review_request.proposed_contract,
+                        "generated_tests": &review_request.proposed_generated_tests,
+                        "input_sample_count": review_request.input_samples_without_expected_output.len(),
+                        "user_example_count": review_request.immutable_user_examples.len()
+                    }),
+                )
+                .await?;
+                let review = self.synthesizer.review_contract(review_request).await?;
+                self.event(
+                    job,
+                    "contract_review_response",
+                    serde_json::to_value(&review)?,
+                )
+                .await?;
+                match review.decision {
+                    ContractReviewDecision::Accept => {}
+                    ContractReviewDecision::Revise => {
+                        return Ok(ToolExecution::Continue(json!({
+                            "ok": false,
+                            "contract_review": &review,
+                            "message": "independent review requires a corrected contract and test plan; resubmit the complete contract"
+                        })));
+                    }
+                    ContractReviewDecision::Reject => {
+                        return Err(JobError::AgentAborted(format!(
+                            "contract review rejected the request: {}; {}",
+                            review.reason,
+                            review.issues.join("; ")
+                        )));
+                    }
+                }
                 self.registry
                     .save_contract(
                         job.job_id,
@@ -309,7 +354,7 @@ impl JobProcessor {
                 workspace.latest_failure = None;
                 Ok(ToolExecution::Continue(json!({
                     "ok": true,
-                    "message": "contract accepted; write the initial source"
+                    "message": "contract independently reviewed and accepted; write the initial source"
                 })))
             }
             "write_source" => {
