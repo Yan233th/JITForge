@@ -11,8 +11,8 @@ use clap::{Args, Parser, Subcommand};
 use jit_config::JitForgeConfig;
 use jit_protocol::{
     ErrorResponse, InvocationRequest, InvocationResponse, IoFormat, JobResponse, JobStatus,
-    MAX_INPUT_SAMPLE_BYTES, RegistrationRequest, RegistrationResponse, ToolExample,
-    ToolListResponse, ToolSummaryResponse,
+    MAX_INPUT_SAMPLE_BYTES, RegistrationRequest, RegistrationResponse, RevokeRequest,
+    RevokeResponse, ToolExample, ToolListResponse, ToolSummaryResponse,
 };
 use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -49,7 +49,8 @@ enum Command {
     /// Register a new immutable candidate version. Piped stdin is used as an input sample.
     Register {
         name: String,
-        description: String,
+        #[arg(value_name = "INTENT")]
+        intent: String,
 
         #[arg(long = "example", value_name = "INPUT => OUTPUT")]
         examples: Vec<String>,
@@ -114,6 +115,15 @@ enum Command {
     Inspect {
         #[arg(value_name = "NAME[@REVISION]")]
         tool: String,
+    },
+
+    /// Revoke a published version and stop it from being called.
+    Revoke {
+        #[arg(value_name = "NAME@REVISION")]
+        tool: String,
+
+        #[arg(long, value_name = "TEXT")]
+        reason: String,
     },
 }
 
@@ -192,7 +202,7 @@ async fn run(cli: &Cli) -> CliResult<i32> {
     match &cli.command {
         Command::Register {
             name,
-            description,
+            intent,
             examples,
             input_format,
             output_format,
@@ -201,7 +211,7 @@ async fn run(cli: &Cli) -> CliResult<i32> {
         } => {
             let input_samples = read_registration_input_samples()?;
             let request = RegistrationRequest {
-                description: description.clone(),
+                intent: intent.clone(),
                 input_format: parse_io_format(input_format)?,
                 output_format: parse_io_format(output_format)?,
                 examples: examples
@@ -375,6 +385,40 @@ async fn run(cli: &Cli) -> CliResult<i32> {
                 print_json(&tool)?;
             } else {
                 print_tool_summary(&tool);
+            }
+            Ok(0)
+        }
+        Command::Revoke { tool, reason } => {
+            let (name, revision) = parse_tool_reference(tool)?;
+            let revision = revision.ok_or_else(|| {
+                CliFailure::local(
+                    64,
+                    "revision_required",
+                    "revoke requires an explicit NAME@REVISION",
+                )
+            })?;
+            let response = authenticated(
+                client
+                    .post(format!(
+                        "{server}/v1/tools/{name}/versions/{revision}/revoke"
+                    ))
+                    .json(&RevokeRequest {
+                        reason: reason.clone(),
+                    }),
+                token,
+            )
+            .send()
+            .await
+            .map_err(CliFailure::transport)?;
+            let response = decode_response::<RevokeResponse>(response).await?;
+            if cli.json {
+                print_json(&response)?;
+            } else {
+                println!("{}@{}", response.tool, response.revision);
+                match response.stable_revision {
+                    Some(stable) => eprintln!("jit: revoked; stable is now {name}@{stable}"),
+                    None => eprintln!("jit: revoked; {name} has no callable stable version"),
+                }
             }
             Ok(0)
         }
@@ -631,6 +675,7 @@ fn print_tool_summary(tool: &ToolSummaryResponse) {
     println!("latest: {}", tool.latest_revision);
     println!("input: {}", tool.selected.input_format.as_str());
     println!("output: {}", tool.selected.output_format.as_str());
+    println!("intent: {}", tool.selected.requested_intent);
     println!("description: {}", tool.selected.description);
     if !tool.selected.assumptions.is_empty() {
         println!("assumptions:");
@@ -858,6 +903,23 @@ mod tests {
     fn list_has_an_ls_alias() {
         let cli = Cli::try_parse_from(["jit", "ls"]).unwrap();
         assert!(matches!(cli.command, Command::List { .. }));
+    }
+
+    #[test]
+    fn parses_explicit_revision_revocation() {
+        let cli = Cli::try_parse_from([
+            "jit",
+            "revoke",
+            "log-analysis@1",
+            "--reason",
+            "incorrect implementation",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Revoke { tool, reason }
+                if tool == "log-analysis@1" && reason == "incorrect implementation"
+        ));
     }
 
     #[test]

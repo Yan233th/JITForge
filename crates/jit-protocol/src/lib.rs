@@ -57,7 +57,8 @@ pub struct ToolExample {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RegistrationRequest {
-    pub description: String,
+    #[serde(alias = "description")]
+    pub intent: String,
     #[serde(default)]
     pub input_format: IoFormat,
     #[serde(default)]
@@ -66,6 +67,19 @@ pub struct RegistrationRequest {
     pub examples: Vec<ToolExample>,
     #[serde(default)]
     pub input_samples: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RevokeRequest {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RevokeResponse {
+    pub tool: String,
+    pub revision: u64,
+    pub status: ToolVersionStatus,
+    pub stable_revision: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -174,6 +188,7 @@ pub struct JobResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolVersionSummary {
     pub revision: u64,
+    pub requested_intent: String,
     pub description: String,
     pub status: ToolVersionStatus,
     pub input_format: IoFormat,
@@ -214,6 +229,23 @@ pub struct ToolListResponse {
     pub tools: Vec<ToolListItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_offset: Option<u64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registration_accepts_legacy_description_as_intent() {
+        let request: RegistrationRequest = serde_json::from_value(serde_json::json!({
+            "description": "make a slug"
+        }))
+        .unwrap();
+        assert_eq!(request.intent, "make a slug");
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["intent"], "make a slug");
+        assert!(encoded.get("description").is_none());
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

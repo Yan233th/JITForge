@@ -12,10 +12,11 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use jit_config::{JitForgeConfig, nonempty_env};
-use jit_domain::{ToolDescription, ToolName};
+use jit_domain::{ToolIntent, ToolName};
 use jit_protocol::{
     ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, MAX_INPUT_SAMPLE_BYTES,
     MAX_INPUT_SAMPLES, MAX_INPUT_SAMPLES_TOTAL_BYTES, ReadyResponse, RegistrationRequest,
+    RevokeRequest,
     worker::{ExecuteRequest, runner_client::RunnerClient},
 };
 use jit_storage::{Registry, StorageError};
@@ -125,6 +126,10 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", get(inspect_tool))
         .route("/v1/tools/{name}/registrations", post(register_tool))
+        .route(
+            "/v1/tools/{name}/versions/{revision}/revoke",
+            post(revoke_tool_version),
+        )
         .route("/v1/tools/{name}/invocations", post(invoke_tool))
         .route("/v1/jobs/{job_id}", get(get_job))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
@@ -181,8 +186,8 @@ async fn register_tool(
         .parse::<ToolName>()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     request
-        .description
-        .parse::<ToolDescription>()
+        .intent
+        .parse::<ToolIntent>()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if request.examples.len() > 32 {
         return Err(ApiError::bad_request("at most 32 examples are allowed"));
@@ -227,6 +232,32 @@ async fn register_tool(
         .map_err(ApiError::from_storage)?;
     info!(tool = %name, revision = response.revision, job_id = %response.job_id, "registration accepted");
     Ok((StatusCode::ACCEPTED, Json(response)))
+}
+
+async fn revoke_tool_version(
+    State(state): State<AppState>,
+    Path((raw_name, revision)): Path<(String, u64)>,
+    Json(request): Json<RevokeRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let name = raw_name
+        .parse::<ToolName>()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.len() > 4096 {
+        return Err(ApiError::bad_request(
+            "revocation reason must contain 1-4096 non-whitespace bytes",
+        ));
+    }
+    if revision == 0 {
+        return Err(ApiError::bad_request("tool revision must be positive"));
+    }
+    let response = state
+        .registry
+        .revoke_tool_version(&name, revision, reason)
+        .await
+        .map_err(ApiError::from_storage)?;
+    info!(tool = %name, revision, "tool version revoked");
+    Ok(Json(response))
 }
 
 async fn get_job(
@@ -498,6 +529,11 @@ impl ApiError {
                 StatusCode::NOT_FOUND,
                 "version_not_found",
                 "tool version not found",
+            ),
+            StorageError::VersionNotRevocable(status) => Self::new(
+                StatusCode::CONFLICT,
+                "version_not_revocable",
+                format!("tool version in status {status:?} cannot be revoked"),
             ),
             StorageError::JobNotFound => Self::new(
                 StatusCode::NOT_FOUND,

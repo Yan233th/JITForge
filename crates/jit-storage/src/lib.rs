@@ -4,8 +4,8 @@ use chrono::{DateTime, Utc};
 use jit_domain::{ToolName, ToolVersionStatus};
 use jit_protocol::{
     IoFormat, JobError, JobResponse, JobStage, JobStatus, RegistrationRequest,
-    RegistrationResponse, ToolExample, ToolListItem, ToolListResponse, ToolSummaryResponse,
-    ToolVersionSummary,
+    RegistrationResponse, RevokeResponse, ToolExample, ToolListItem, ToolListResponse,
+    ToolSummaryResponse, ToolVersionSummary,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -135,12 +135,12 @@ impl Registry {
 
         sqlx::query(
             "INSERT INTO tool_versions
-             (tool_id, revision, description, input_format, output_format, examples, status)
-             VALUES ($1, $2, $3, $4, $5, $6, 'draft')",
+             (tool_id, revision, requested_intent, description, input_format, output_format, examples, status)
+             VALUES ($1, $2, $3, $3, $4, $5, $6, 'draft')",
         )
         .bind(tool_id)
         .bind(revision)
-        .bind(&request.description)
+        .bind(&request.intent)
         .bind(request.input_format.as_str())
         .bind(request.output_format.as_str())
         .bind(serde_json::to_value(&request.examples)?)
@@ -289,7 +289,7 @@ impl Registry {
         })?;
 
         let version = sqlx::query(
-            "SELECT revision, description, status, input_format, output_format, assumptions,
+            "SELECT revision, requested_intent, description, status, input_format, output_format, assumptions,
                     contract, artifact_digest, validation_summary, error_code, error_message
              FROM tool_versions WHERE tool_id = $1 AND revision = $2",
         )
@@ -317,6 +317,7 @@ impl Registry {
             latest_revision,
             selected: ToolVersionSummary {
                 revision: to_u64(version.try_get("revision")?, "revision")?,
+                requested_intent: version.try_get("requested_intent")?,
                 description: version.try_get("description")?,
                 status: parse_version_status(version.try_get("status")?)?,
                 input_format: parse_io_format(version.try_get("input_format")?)?,
@@ -327,6 +328,76 @@ impl Registry {
                 validation_summary: version.try_get("validation_summary")?,
                 error,
             },
+        })
+    }
+
+    pub async fn revoke_tool_version(
+        &self,
+        name: &ToolName,
+        revision: u64,
+        reason: &str,
+    ) -> Result<RevokeResponse, StorageError> {
+        let revision = i64::try_from(revision).map_err(|_| StorageError::VersionNotFound)?;
+        let mut transaction = self.pool.begin().await?;
+        let tool = sqlx::query("SELECT id, stable_revision FROM tools WHERE name = $1 FOR UPDATE")
+            .bind(name.as_str())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::ToolNotFound)?;
+        let tool_id: Uuid = tool.try_get("id")?;
+        let stable_revision: Option<i64> = tool.try_get("stable_revision")?;
+        let version = sqlx::query(
+            "SELECT status FROM tool_versions
+             WHERE tool_id = $1 AND revision = $2 FOR UPDATE",
+        )
+        .bind(tool_id)
+        .bind(revision)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::VersionNotFound)?;
+        let status: String = version.try_get("status")?;
+        if !matches!(status.as_str(), "ready" | "deprecated") {
+            return Err(StorageError::VersionNotRevocable(status));
+        }
+
+        sqlx::query(
+            "UPDATE tool_versions
+             SET status = 'revoked', error_code = 'revoked', error_message = $3,
+                 updated_at = now()
+             WHERE tool_id = $1 AND revision = $2",
+        )
+        .bind(tool_id)
+        .bind(revision)
+        .bind(reason)
+        .execute(&mut *transaction)
+        .await?;
+
+        let next_stable = if stable_revision == Some(revision) {
+            let fallback = sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT max(revision) FROM tool_versions
+                 WHERE tool_id = $1 AND status = 'ready' AND revision <> $2",
+            )
+            .bind(tool_id)
+            .bind(revision)
+            .fetch_one(&mut *transaction)
+            .await?;
+            sqlx::query("UPDATE tools SET stable_revision = $2, updated_at = now() WHERE id = $1")
+                .bind(tool_id)
+                .bind(fallback)
+                .execute(&mut *transaction)
+                .await?;
+            fallback
+        } else {
+            stable_revision
+        };
+        transaction.commit().await?;
+        Ok(RevokeResponse {
+            tool: name.to_string(),
+            revision: to_u64(revision, "revision")?,
+            status: ToolVersionStatus::Revoked,
+            stable_revision: next_stable
+                .map(|value| to_u64(value, "stable_revision"))
+                .transpose()?,
         })
     }
 
@@ -397,7 +468,7 @@ impl Registry {
 
         let row = sqlx::query(
             "SELECT j.id, j.tool_id, t.name, j.revision, j.attempts,
-                    v.description, v.input_format, v.output_format, v.examples, j.input_samples,
+                    v.requested_intent, v.input_format, v.output_format, v.examples, j.input_samples,
                     ar.engine AS agent_engine, ar.engine_version AS agent_engine_version,
                     ar.checkpoint AS agent_checkpoint
              FROM synthesis_jobs j
@@ -432,7 +503,7 @@ impl Registry {
             tool_id: row.try_get("tool_id")?,
             tool: row.try_get("name")?,
             revision: to_u64(row.try_get("revision")?, "revision")?,
-            description: row.try_get("description")?,
+            intent: row.try_get("requested_intent")?,
             input_format: parse_io_format(row.try_get("input_format")?)?,
             output_format: parse_io_format(row.try_get("output_format")?)?,
             examples: serde_json::from_value(examples)?,
@@ -656,7 +727,7 @@ impl Registry {
     ) -> Result<(), StorageError> {
         let result = sqlx::query(
             "UPDATE tool_versions v
-             SET contract = $3, assumptions = $4, updated_at = now()
+             SET contract = $3, description = $3->>'summary', assumptions = $4, updated_at = now()
              FROM synthesis_jobs j
              WHERE j.id = $1 AND j.worker_id = $2 AND j.status = 'running'
                AND v.tool_id = j.tool_id AND v.revision = j.revision",
@@ -981,7 +1052,7 @@ pub struct ClaimedSynthesisJob {
     pub tool_id: Uuid,
     pub tool: String,
     pub revision: u64,
-    pub description: String,
+    pub intent: String,
     pub input_format: IoFormat,
     pub output_format: IoFormat,
     pub examples: Vec<ToolExample>,
@@ -1087,6 +1158,9 @@ pub enum StorageError {
     #[error("tool version not found")]
     VersionNotFound,
 
+    #[error("tool version in status {0:?} cannot be revoked")]
+    VersionNotRevocable(String),
+
     #[error("synthesis job not found")]
     JobNotFound,
 
@@ -1121,7 +1195,7 @@ mod tests {
     fn registration_fingerprint_is_stable_and_payload_sensitive() {
         let name = ToolName::from_str("slugify").unwrap();
         let mut request = RegistrationRequest {
-            description: "make a slug".to_owned(),
+            intent: "make a slug".to_owned(),
             input_format: IoFormat::Text,
             output_format: IoFormat::Text,
             examples: vec![ToolExample {
@@ -1132,7 +1206,7 @@ mod tests {
         };
         let first = registration_fingerprint(&name, &request).unwrap();
         assert_eq!(first, registration_fingerprint(&name, &request).unwrap());
-        request.description.push('!');
+        request.intent.push('!');
         assert_ne!(first, registration_fingerprint(&name, &request).unwrap());
     }
 }

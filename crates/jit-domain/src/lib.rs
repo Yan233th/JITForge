@@ -49,21 +49,21 @@ impl FromStr for ToolName {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ToolDescription(String);
+pub struct ToolIntent(String);
 
-impl ToolDescription {
+impl ToolIntent {
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
-impl FromStr for ToolDescription {
+impl FromStr for ToolIntent {
     type Err = DomainError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         let value = value.trim();
         if value.is_empty() || value.len() > MAX_DESCRIPTION_LEN {
-            return Err(DomainError::InvalidDescription);
+            return Err(DomainError::InvalidIntent);
         }
         Ok(Self(value.to_owned()))
     }
@@ -140,8 +140,8 @@ pub enum DomainError {
     #[error("tool name must be 1-64 characters of lowercase ASCII letters, digits, '-' or '_'")]
     InvalidToolName,
 
-    #[error("description must contain 1-4096 non-whitespace bytes")]
-    InvalidDescription,
+    #[error("intent must contain 1-4096 non-whitespace bytes")]
+    InvalidIntent,
 
     #[error("unknown tool version status {0:?}")]
     InvalidVersionStatus(String),

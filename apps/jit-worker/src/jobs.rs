@@ -429,7 +429,7 @@ impl JobProcessor {
                     .cloned()
                     .ok_or_else(|| invalid_action("generated test does not exist"))?;
                 let request = TestVerificationRequest {
-                    description: job.description.clone(),
+                    intent: job.intent.clone(),
                     input_format: job.input_format,
                     output_format: job.output_format,
                     contract: draft.contract.clone(),
@@ -789,7 +789,7 @@ fn load_or_create_run(
     let prompt = Message::user(serde_json::to_string(&json!({
         "task": "create_and_publish_unix_tool",
         "name": job.tool,
-        "description": job.description,
+        "user_intent": job.intent,
         "input_format": job.input_format,
         "output_format": job.output_format,
         "input_samples_without_expected_output": job.input_samples,
@@ -804,7 +804,7 @@ fn load_or_create_run(
 
 fn fixture_context(job: &ClaimedSynthesisJob, workspace: &AgentWorkspace) -> FixtureContext {
     FixtureContext {
-        description: job.description.clone(),
+        intent: job.intent.clone(),
         examples: job.examples.clone(),
         has_contract: workspace.draft.is_some(),
         current_source: workspace.source.clone(),
@@ -1357,7 +1357,7 @@ mod tests {
             tool_id: uuid::Uuid::now_v7(),
             tool: "example".to_owned(),
             revision: 1,
-            description: "example".to_owned(),
+            intent: "example".to_owned(),
             input_format: IoFormat::Text,
             output_format: IoFormat::Text,
             examples: vec![],
