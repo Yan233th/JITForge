@@ -192,6 +192,25 @@ pub struct ToolSummaryResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolListItem {
+    pub tool: String,
+    pub stable_revision: Option<u64>,
+    pub latest_revision: u64,
+    pub selected_revision: u64,
+    pub description: String,
+    pub status: ToolVersionStatus,
+    pub input_format: IoFormat,
+    pub output_format: IoFormat,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ToolListResponse {
+    pub tools: Vec<ToolListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct InvocationRequest {
     #[serde(default)]
     pub revision: Option<u64>,

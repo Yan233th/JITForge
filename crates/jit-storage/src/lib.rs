@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use jit_domain::{ToolName, ToolVersionStatus};
 use jit_protocol::{
     IoFormat, JobError, JobResponse, JobStage, JobStatus, RegistrationRequest,
-    RegistrationResponse, ToolExample, ToolSummaryResponse, ToolVersionSummary,
+    RegistrationResponse, ToolExample, ToolListItem, ToolListResponse, ToolSummaryResponse,
+    ToolVersionSummary,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -184,6 +185,81 @@ impl Registry {
         .await?
         .ok_or(StorageError::JobNotFound)?;
         map_job(row)
+    }
+
+    pub async fn list_tools(
+        &self,
+        query: &str,
+        include_unready: bool,
+        limit: u32,
+        offset: u64,
+    ) -> Result<ToolListResponse, StorageError> {
+        let query = query.trim();
+        let row_limit = i64::from(limit)
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Invariant("tool list limit overflow".to_owned()))?;
+        let offset = i64::try_from(offset).map_err(|_| {
+            StorageError::Invariant("tool list offset exceeds PostgreSQL BIGINT".to_owned())
+        })?;
+        let mut rows = sqlx::query(
+            "SELECT t.name, t.latest_revision, t.stable_revision,
+                    v.revision AS selected_revision, v.description, v.status,
+                    v.input_format, v.output_format
+             FROM tools t
+             JOIN tool_versions v
+               ON v.tool_id = t.id
+              AND v.revision = COALESCE(t.stable_revision, t.latest_revision)
+             WHERE ($1 OR t.stable_revision IS NOT NULL)
+               AND ($2 = ''
+                    OR strpos(lower(t.name), lower($2)) > 0
+                    OR strpos(lower(v.description), lower($2)) > 0)
+             ORDER BY CASE
+                        WHEN lower(t.name) = lower($2) THEN 0
+                        WHEN left(lower(t.name), char_length($2)) = lower($2) THEN 1
+                        ELSE 2
+                      END,
+                      t.name
+             LIMIT $3 OFFSET $4",
+        )
+        .bind(include_unready)
+        .bind(query)
+        .bind(row_limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let has_more = rows.len() > limit as usize;
+        rows.truncate(limit as usize);
+        let tools = rows
+            .into_iter()
+            .map(|row| {
+                let stable_revision = row
+                    .try_get::<Option<i64>, _>("stable_revision")?
+                    .map(|value| to_u64(value, "stable_revision"))
+                    .transpose()?;
+                Ok(ToolListItem {
+                    tool: row.try_get("name")?,
+                    stable_revision,
+                    latest_revision: to_u64(row.try_get("latest_revision")?, "latest_revision")?,
+                    selected_revision: to_u64(
+                        row.try_get("selected_revision")?,
+                        "selected_revision",
+                    )?,
+                    description: row.try_get("description")?,
+                    status: parse_version_status(row.try_get("status")?)?,
+                    input_format: parse_io_format(row.try_get("input_format")?)?,
+                    output_format: parse_io_format(row.try_get("output_format")?)?,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let next_offset = has_more
+            .then(|| {
+                u64::try_from(offset)
+                    .ok()
+                    .and_then(|offset| offset.checked_add(u64::from(limit)))
+            })
+            .flatten();
+        Ok(ToolListResponse { tools, next_offset })
     }
 
     pub async fn inspect_tool(

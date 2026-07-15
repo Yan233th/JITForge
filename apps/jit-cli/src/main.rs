@@ -7,10 +7,10 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use jit_protocol::{
     ErrorResponse, InvocationRequest, InvocationResponse, IoFormat, JobResponse, JobStatus,
-    RegistrationRequest, RegistrationResponse, ToolExample, ToolSummaryResponse,
+    RegistrationRequest, RegistrationResponse, ToolExample, ToolListResponse, ToolSummaryResponse,
 };
 use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -91,11 +91,45 @@ enum Command {
     /// Show a synthesis job without changing it.
     Status { job_id: String },
 
+    /// List callable tools, optionally filtering by name or description.
+    #[command(visible_alias = "ls")]
+    List {
+        #[arg(value_name = "QUERY")]
+        query: Option<String>,
+
+        #[command(flatten)]
+        options: ToolListOptions,
+    },
+
+    /// Search callable tools by name or description.
+    Search {
+        #[arg(value_name = "QUERY")]
+        query: String,
+
+        #[command(flatten)]
+        options: ToolListOptions,
+    },
+
     /// Show a tool's selected version, contract, assumptions and validation.
     Inspect {
         #[arg(value_name = "NAME[@REVISION]")]
         tool: String,
     },
+}
+
+#[derive(Debug, Args)]
+struct ToolListOptions {
+    #[arg(long, help = "Include tools without a ready stable revision")]
+    all: bool,
+
+    #[arg(long, help = "Print only tool names")]
+    names_only: bool,
+
+    #[arg(long, default_value_t = 50)]
+    limit: u32,
+
+    #[arg(long, default_value_t = 0)]
+    offset: u64,
 }
 
 #[tokio::main]
@@ -290,6 +324,20 @@ async fn run(cli: &Cli) -> CliResult<i32> {
             }
             Ok(0)
         }
+        Command::List { query, options } => {
+            list_tools(
+                &client,
+                server,
+                token,
+                query.as_deref().unwrap_or_default(),
+                options,
+                cli.json,
+            )
+            .await
+        }
+        Command::Search { query, options } => {
+            list_tools(&client, server, token, query, options, cli.json).await
+        }
         Command::Inspect { tool } => {
             let (name, revision) = parse_tool_reference(tool)?;
             let mut request = authenticated(client.get(format!("{server}/v1/tools/{name}")), token);
@@ -306,6 +354,51 @@ async fn run(cli: &Cli) -> CliResult<i32> {
             Ok(0)
         }
     }
+}
+
+async fn list_tools(
+    client: &reqwest::Client,
+    server: &str,
+    token: &str,
+    query: &str,
+    options: &ToolListOptions,
+    json: bool,
+) -> CliResult<i32> {
+    if query.len() > 256 {
+        return Err(CliFailure::local(
+            64,
+            "invalid_query",
+            "tool search query must not exceed 256 bytes",
+        ));
+    }
+    if !(1..=100).contains(&options.limit) {
+        return Err(CliFailure::local(
+            64,
+            "invalid_limit",
+            "list limit must be between 1 and 100",
+        ));
+    }
+    let parameters = [
+        ("query", query.to_owned()),
+        ("include_unready", options.all.to_string()),
+        ("limit", options.limit.to_string()),
+        ("offset", options.offset.to_string()),
+    ];
+    let response = authenticated(client.get(format!("{server}/v1/tools")), token)
+        .query(&parameters)
+        .send()
+        .await
+        .map_err(CliFailure::transport)?;
+    let response = decode_response::<ToolListResponse>(response).await?;
+    if json {
+        print_json(&response)?;
+    } else {
+        print_tool_list(&response, options.names_only);
+        if let Some(next_offset) = response.next_offset {
+            eprintln!("jit: more tools available; use --offset {next_offset}");
+        }
+    }
+    Ok(0)
 }
 
 async fn wait_for_job(
@@ -495,6 +588,65 @@ fn print_tool_summary(tool: &ToolSummaryResponse) {
     }
 }
 
+fn print_tool_list(response: &ToolListResponse, names_only: bool) {
+    if names_only {
+        for tool in &response.tools {
+            println!("{}", tool.tool);
+        }
+        return;
+    }
+    if response.tools.is_empty() {
+        return;
+    }
+    let name_width = response
+        .tools
+        .iter()
+        .map(|tool| tool.tool.chars().count())
+        .max()
+        .unwrap_or(4)
+        .max(4);
+    println!(
+        "{:<name_width$}  {:>8}  {:<11}  {:<9}  DESCRIPTION",
+        "NAME", "REVISION", "STATUS", "I/O"
+    );
+    for tool in &response.tools {
+        let io = format!(
+            "{}/{}",
+            tool.input_format.as_str(),
+            tool.output_format.as_str()
+        );
+        println!(
+            "{:<name_width$}  {:>8}  {:<11}  {:<9}  {}",
+            tool.tool,
+            tool.selected_revision,
+            tool.status.as_str(),
+            io,
+            single_line(&tool.description, 96)
+        );
+    }
+}
+
+fn single_line(value: &str, limit: usize) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let normalized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut characters = normalized.chars();
+    let abbreviated: String = characters.by_ref().take(limit).collect();
+    if characters.next().is_some() {
+        format!("{abbreviated}…")
+    } else {
+        abbreviated
+    }
+}
+
 fn format_revision(revision: Option<u64>) -> String {
     revision
         .map(|value| value.to_string())
@@ -623,5 +775,18 @@ mod tests {
             "request_id": failure.request_id,
         });
         assert_eq!(value["code"], "invalid_input");
+    }
+
+    #[test]
+    fn list_has_an_ls_alias() {
+        let cli = Cli::try_parse_from(["jit", "ls"]).unwrap();
+        assert!(matches!(cli.command, Command::List { .. }));
+    }
+
+    #[test]
+    fn list_descriptions_are_single_line_and_bounded() {
+        assert_eq!(single_line("one\n two\tthree", 20), "one two three");
+        assert_eq!(single_line("safe\u{1b}[31mtext", 20), "safe [31mtext");
+        assert_eq!(single_line("abcdef", 3), "abc…");
     }
 }

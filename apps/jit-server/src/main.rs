@@ -118,6 +118,7 @@ impl Config {
 
 fn build_router(state: AppState) -> Router {
     let protected = Router::new()
+        .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", get(inspect_tool))
         .route("/v1/tools/{name}/registrations", post(register_tool))
         .route("/v1/tools/{name}/invocations", post(invoke_tool))
@@ -208,6 +209,41 @@ async fn get_job(
     let response = state
         .registry
         .get_job(job_id)
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ListToolsQuery {
+    #[serde(default)]
+    query: String,
+    #[serde(default)]
+    include_unready: bool,
+    limit: Option<u32>,
+    offset: Option<u64>,
+}
+
+async fn list_tools(
+    State(state): State<AppState>,
+    Query(query): Query<ListToolsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    if query.query.len() > 256 {
+        return Err(ApiError::bad_request(
+            "tool search query must not exceed 256 bytes",
+        ));
+    }
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) {
+        return Err(ApiError::bad_request("limit must be between 1 and 100"));
+    }
+    let offset = query.offset.unwrap_or(0);
+    if offset > i64::MAX as u64 {
+        return Err(ApiError::bad_request("offset is too large"));
+    }
+    let response = state
+        .registry
+        .list_tools(&query.query, query.include_unready, limit, offset)
         .await
         .map_err(ApiError::from_storage)?;
     Ok(Json(response))
