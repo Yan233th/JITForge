@@ -1,0 +1,23 @@
+[package]
+name = "jit-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+jit-domain = { path = "../../crates/jit-domain" }
+jit-protocol = { path = "../../crates/jit-protocol" }
+jit-storage = { path = "../../crates/jit-storage" }
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+tokio.workspace = true
+tonic.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+ulid.workspace = true
+uuid.workspace = true

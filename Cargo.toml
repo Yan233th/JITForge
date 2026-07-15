@@ -1,9 +1,15 @@
 [workspace]
 members = [
+    "apps/jit-cli",
+    "apps/jit-server",
     "crates/jit-artifact",
     "crates/jit-domain",
     "crates/jit-protocol",
     "crates/jit-storage",
+]
+default-members = [
+    "apps/jit-cli",
+    "apps/jit-server",
 ]
 resolver = "2"
 
