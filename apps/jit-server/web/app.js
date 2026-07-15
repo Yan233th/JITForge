@@ -142,7 +142,7 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
     element("button", { className: "primary compact-button", text: "搜索", type: "submit" })
   ]);
   const resultMeta = element("span", { className: "panel-meta", text: "加载中" });
-  const results = element("div", { className: "results-region tool-results" }, loadingRows());
+  const results = element("div", { className: "results-region tool-results" }, loadingCards());
   const toolPanel = panel("能力列表", [form, results], resultMeta);
   const jobsRegion = element("div", { className: "results-region" }, loadingRows(3));
   view.append(toolPanel, panel("最近合成任务", jobsRegion));
@@ -183,30 +183,18 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
 }
 
 function renderToolsResult(tools, offset, previousPage, nextPage) {
-  const table = element("table");
-  table.append(tableHead(["工具", "状态", "稳定版本", "最新版本", "格式", "能力描述"]));
-  const body = element("tbody");
-  for (const tool of tools.tools) {
-    const row = element("tr", { className: "clickable" });
-    row.append(
-      element("td", { text: tool.tool }),
-      element("td", {}, badge(tool.status)),
-      element("td", { text: tool.stable_revision ?? "—" }),
-      element("td", { text: tool.latest_revision }),
-      element("td", { text: `${tool.input_format} → ${tool.output_format}` }),
-      element("td", { className: "description-column" }, element("div", { className: "description-cell", text: tool.description }))
-    );
-    row.addEventListener("click", () => { location.hash = `#/tools/${encodeURIComponent(tool.tool)}`; });
-    body.append(row);
+  const viewport = element("div", { className: "capability-viewport" });
+  const grid = element("div", { className: "capability-grid" });
+  if (tools.tools.length) {
+    tools.tools.forEach((tool, index) => grid.append(capabilityCard(tool, offset + index + 1)));
+  } else {
+    grid.append(element("div", { className: "capability-empty" }, [
+      element("span", { className: "empty-glyph", text: "∅" }),
+      element("strong", { text: "没有匹配的能力" }),
+      element("span", { text: "调整关键词或状态范围后再次搜索" })
+    ]));
   }
-  if (!tools.tools.length) {
-    const row = element("tr");
-    const cell = element("td", { className: "table-empty", text: "没有匹配的工具" });
-    cell.colSpan = 6;
-    row.append(cell);
-    body.append(row);
-  }
-  table.append(body);
+  viewport.append(grid);
   const pager = element("div", { className: "form-actions" });
   if (offset > 0) {
     const previous = element("button", { className: "ghost", text: "上一页", type: "button" });
@@ -218,12 +206,42 @@ function renderToolsResult(tools, offset, previousPage, nextPage) {
     next.addEventListener("click", () => nextPage(tools.next_offset));
     pager.append(next);
   }
-  return element("div", {}, [element("div", { className: "table-wrap" }, table), pager]);
+  return element("div", {}, [viewport, pager]);
+}
+
+function capabilityCard(tool, index) {
+  const card = element("article", { className: "capability-card" });
+  const top = element("div", { className: "capability-card-top" }, [
+    element("span", { className: "card-kicker", text: `${String(index).padStart(2, "0")} / capability` }),
+    badge(tool.status)
+  ]);
+  const title = element("h3", { text: tool.tool });
+  const description = element("p", { className: "capability-description", text: tool.description });
+  const footer = element("div", { className: "capability-footer" }, [
+    element("div", { className: "tech-tags" }, [
+      element("span", { className: "tech-tag", text: `${tool.input_format} → ${tool.output_format}` }),
+      element("span", { className: "tech-tag", text: `stable / ${tool.stable_revision ?? "—"}` })
+    ]),
+    element("span", { className: "capability-link", text: `rev ${tool.latest_revision}  ↗` })
+  ]);
+  card.append(top, title, description, footer);
+  card.addEventListener("click", () => { location.hash = `#/tools/${encodeURIComponent(tool.tool)}`; });
+  card.tabIndex = 0;
+  card.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); card.click(); } });
+  return card;
 }
 
 function loadingRows(count = 5) {
   const container = element("div", { className: "loading-list" });
   for (let index = 0; index < count; index += 1) container.append(element("div", { className: "loading-row" }));
+  return container;
+}
+
+function loadingCards() {
+  const container = element("div", { className: "capability-viewport" });
+  const grid = element("div", { className: "capability-grid" });
+  for (let index = 0; index < 4; index += 1) grid.append(element("div", { className: "loading-card" }));
+  container.append(grid);
   return container;
 }
 
