@@ -2,6 +2,7 @@
 members = [
     "apps/jit-cli",
     "apps/jit-server",
+    "apps/jit-worker",
     "crates/jit-artifact",
     "crates/jit-domain",
     "crates/jit-protocol",
