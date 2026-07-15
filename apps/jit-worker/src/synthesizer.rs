@@ -676,10 +676,15 @@ pub fn validate_source(source: &str) -> Result<(), SynthesisError> {
 }
 
 fn retryable(error: &CompletionError) -> bool {
-    error
-        .provider_response_status()
-        .map(|status| status.as_u16() == 429 || status.as_u16() >= 500)
-        .unwrap_or(true)
+    retryable_status(
+        error
+            .provider_response_status()
+            .map(|status| status.as_u16()),
+    )
+}
+
+fn retryable_status(status: Option<u16>) -> bool {
+    status.is_none_or(|status| (200..300).contains(&status) || status == 429 || status >= 500)
 }
 
 fn required_setting(name: &'static str, value: Option<String>) -> Result<String, SynthesisError> {
@@ -921,6 +926,17 @@ mod tests {
         );
         let review = parse_contract_review_turn(&concrete_revision).unwrap();
         assert_eq!(review.decision, ContractReviewDecision::Revise);
+    }
+
+    #[test]
+    fn malformed_successful_provider_responses_are_retryable() {
+        assert!(retryable_status(None));
+        assert!(retryable_status(Some(200)));
+        assert!(retryable_status(Some(204)));
+        assert!(retryable_status(Some(429)));
+        assert!(retryable_status(Some(503)));
+        assert!(!retryable_status(Some(400)));
+        assert!(!retryable_status(Some(401)));
     }
 
     #[test]
