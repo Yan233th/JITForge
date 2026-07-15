@@ -36,10 +36,19 @@ function showToast(message) {
   toast.classList.remove("hidden");
   window.setTimeout(() => toast.classList.add("hidden"), 3500);
 }
-function setPage(title, eyebrow) {
+function setPage(title, eyebrow, action = null) {
   $("#page-title").textContent = eyebrow;
   $("#page-label").textContent = title;
-  const section = (location.hash.split("/")[1] || "tools").split("?")[0];
+  const pageAction = $("#page-action");
+  if (action) {
+    pageAction.textContent = action.text;
+    pageAction.href = action.href;
+    pageAction.classList.remove("hidden");
+  } else {
+    pageAction.classList.add("hidden");
+  }
+  const routeSection = (location.hash.split("/")[1] || "tools").split("?")[0];
+  const section = routeSection === "register" ? "tools" : routeSection;
   document.querySelectorAll("[data-nav]").forEach((item) => item.classList.toggle("active", item.dataset.nav === section));
 }
 
@@ -181,7 +190,7 @@ async function renderStatus(view) {
 }
 
 async function renderTools(view, offset = 0, search = "", includeUnready = false) {
-  setPage("工具", "Capabilities");
+  setPage("工具", "Capabilities", { text: "注册新工具", href: "#/register" });
   const searchInput = element("input", { type: "search", value: search, placeholder: "搜索名称或能力描述" });
   const include = element("input", { type: "checkbox" });
   include.checked = includeUnready;
