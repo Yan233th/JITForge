@@ -20,7 +20,7 @@ function element(tag, options = {}, children = []) {
 }
 
 function clear(node) { node.replaceChildren(); }
-function badge(value) { return element("span", { className: `badge ${value}`, text: value }); }
+function badge(value) { return element("span", { className: `badge ${value}`, text: statusText(value) }); }
 function codeBlock(value) { return element("pre", { text: value ?? "" }); }
 function formatTime(value) {
   if (!value) return "—";
@@ -28,7 +28,7 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
 }
 function statusText(value) {
-  return ({ queued: "排队中", running: "处理中", ready: "已就绪", rejected: "已拒绝", revoked: "已撤销", draft: "草稿", synthesizing: "合成中", building: "构建中", validating: "验证中", repairing: "修复中", complete: "完成" })[value] || value;
+  return ({ queued: "排队中", running: "处理中", ready: "已就绪", not_ready: "未就绪", failed: "失败", rejected: "已拒绝", revoked: "已撤销", deprecated: "已弃用", draft: "草稿", contract_ready: "契约就绪", synthesizing: "合成中", building: "构建中", validating: "验证中", repairing: "修复中", complete: "完成" })[value] || value;
 }
 function showToast(message) {
   const toast = $("#toast");
@@ -76,7 +76,6 @@ function showApp(session) {
   state.expiresAt = session.expires_at;
   $("#login-view").classList.add("hidden");
   $("#app-shell").classList.remove("hidden");
-  checkHealth();
   route();
 }
 
@@ -85,19 +84,6 @@ async function restoreSession() {
     showApp(await api("/v1/session"));
   } catch (_) {
     showLogin();
-  }
-}
-
-async function checkHealth() {
-  const target = $("#ready-badge");
-  try {
-    const response = await fetch("/readyz");
-    const health = await response.json();
-    target.textContent = health.status === "ready" ? "Server / DB / Worker 就绪" : "服务尚未就绪";
-    target.className = `health-badge ${health.status === "ready" ? "ready" : "failed"}`;
-  } catch (_) {
-    target.textContent = "无法连接服务";
-    target.className = "health-badge failed";
   }
 }
 
@@ -123,12 +109,75 @@ async function route() {
     if (hash === "#/tools") return await renderTools(view);
     if (hash.startsWith("#/register")) return renderRegister(view);
     if (hash === "#/jobs") return await renderJobs(view);
+    if (hash === "#/status") return await renderStatus(view);
     if (hash.startsWith("#/jobs/")) return await renderJob(view, decodeURIComponent(hash.slice(7)));
     if (hash.startsWith("#/tools/")) return await renderTool(view, decodeURIComponent(hash.slice(8)));
     location.hash = "#/tools";
   } catch (error) {
     view.append(errorView(error));
   }
+}
+
+async function healthProbe(path) {
+  try {
+    const response = await fetch(path, { cache: "no-store", credentials: "same-origin" });
+    return { reachable: true, ok: response.ok, body: await response.json() };
+  } catch (error) {
+    return { reachable: false, ok: false, body: null, error };
+  }
+}
+
+function systemStatusRow(name, description, ready, meta) {
+  return element("article", { className: `status-row ${ready ? "ready" : "failed"}` }, [
+    element("span", { className: "status-dot" }),
+    element("div", { className: "status-copy" }, [element("h3", { text: name }), element("p", { text: description })]),
+    element("div", { className: "status-value" }, [
+      element("strong", { text: ready ? "运行正常" : "当前不可用" }),
+      element("span", { text: meta })
+    ])
+  ]);
+}
+
+async function renderStatus(view) {
+  setPage("运行状态", "System Status");
+  const checkedAt = element("span", { className: "panel-meta", text: "尚未检查" });
+  const refresh = element("button", { className: "ghost", text: "重新检查", type: "button" });
+  const actions = element("div", { className: "panel-actions" }, [checkedAt, refresh]);
+  const content = element("div", {}, loadingRows(3));
+  view.append(panel("服务组件", content, actions));
+
+  const load = async () => {
+    refresh.disabled = true;
+    refresh.textContent = "检查中…";
+    const [health, readiness] = await Promise.all([healthProbe("/healthz"), healthProbe("/readyz")]);
+    const serverReady = health.reachable && health.ok && health.body?.status === "ok";
+    const databaseReady = readiness.reachable && Boolean(readiness.body?.database);
+    const workerReady = readiness.reachable && Boolean(readiness.body?.worker);
+    const allReady = serverReady && databaseReady && workerReady;
+    const version = health.body?.version ? `v${health.body.version}` : "版本未知";
+
+    clear(content);
+    content.append(
+      element("div", { className: `status-overview ${allReady ? "ready" : "failed"}` }, [
+        element("span", { className: "status-dot" }),
+        element("div", {}, [
+          element("strong", { text: allReady ? "所有必要组件运行正常" : "部分必要组件尚未就绪" }),
+          element("p", { text: allReady ? "工具注册、合成与调用链路均可用。" : "请查看下方组件状态定位不可用环节。" })
+        ])
+      ]),
+      element("div", { className: "status-list" }, [
+        systemStatusRow("JITForge Server", "HTTP API 与管理界面请求入口", serverReady, version),
+        systemStatusRow("Registry / PostgreSQL", "工具、版本与任务的持久化存储", databaseReady, "实时连接检查"),
+        systemStatusRow("Worker", "合成任务领取、验证与发布执行器", workerReady, "最近 30 秒心跳")
+      ])
+    );
+    checkedAt.textContent = `检查于 ${new Date().toLocaleTimeString("zh-CN")}`;
+    refresh.disabled = false;
+    refresh.textContent = "重新检查";
+  };
+
+  refresh.addEventListener("click", load);
+  await load();
 }
 
 async function renderTools(view, offset = 0, search = "", includeUnready = false) {
