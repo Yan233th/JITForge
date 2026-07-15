@@ -214,6 +214,10 @@ async fn run(cli: &Cli) -> CliResult<i32> {
                 return Ok(0);
             }
 
+            if !cli.json {
+                eprintln!("jit: job {}", registration.job_id);
+            }
+
             let job = wait_for_job(
                 &client,
                 server,
