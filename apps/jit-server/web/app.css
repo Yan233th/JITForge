@@ -182,27 +182,27 @@ main { min-width: 0; padding: 2rem clamp(1.3rem, 3.4vw, 3.6rem) 5rem; }
 .results-region.updating { opacity: .52; }
 .tool-results { min-height: 514px; }
 .capability-viewport { height: 454px; overflow: auto; scrollbar-color: var(--line-strong) transparent; }
-.capability-grid { min-height: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-content: start; }
+.capability-grid { min-height: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-content: start; }
 .capability-card {
   position: relative;
-  min-height: 216px;
+  min-height: 168px;
   display: flex;
   flex-direction: column;
-  padding: 1.25rem 1.25rem 1.05rem;
+  padding: .92rem 1rem .82rem;
   overflow: hidden;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: 14px;
   background: rgba(255, 255, 255, .76);
   transition: border-color 220ms ease, background 220ms ease, transform 220ms ease;
 }
-.capability-card::after { position: absolute; right: -35px; bottom: -48px; width: 126px; height: 126px; border: 1px solid var(--line); border-radius: 50%; content: ""; opacity: .68; transition: transform 300ms ease, border-color 220ms ease; }
-.capability-card:hover { border-color: var(--line-strong); background: var(--surface-raised); transform: translateY(-3px); cursor: pointer; }
+.capability-card::after { position: absolute; right: -28px; bottom: -35px; width: 88px; height: 88px; border: 1px solid var(--line); border-radius: 50%; content: ""; opacity: .6; transition: transform 300ms ease, border-color 220ms ease; }
+.capability-card:hover { border-color: var(--line-strong); background: var(--surface-raised); transform: translateY(-2px); cursor: pointer; }
 .capability-card:hover::after { border-color: var(--accent); transform: scale(1.22); }
 .capability-card-top, .capability-footer { position: relative; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: .8rem; }
 .card-kicker { color: var(--dim); font-size: .62rem; }
-.capability-card h3 { position: relative; z-index: 1; margin: 1.35rem 0 .65rem; font-size: 1.34rem; line-height: 1.1; letter-spacing: -.055em; }
-.capability-description { position: relative; z-index: 1; display: -webkit-box; margin: 0; overflow: hidden; color: var(--muted); font-size: .83rem; line-height: 1.66; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; }
-.capability-footer { align-items: flex-end; margin-top: auto; padding-top: 1.15rem; }
+.capability-card h3 { position: relative; z-index: 1; margin: .72rem 0 .38rem; font-size: 1.12rem; line-height: 1.12; letter-spacing: -.045em; }
+.capability-description { position: relative; z-index: 1; display: -webkit-box; margin: 0; overflow: hidden; color: var(--muted); font-size: .78rem; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.capability-footer { align-items: flex-end; margin-top: auto; padding-top: .72rem; }
 .tech-tags { display: flex; flex-wrap: wrap; gap: 5px; }
 .tech-tag { padding: .22rem .42rem; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: .56rem; }
 .capability-link { flex-shrink: 0; color: var(--text-soft); font-size: .59rem; }
@@ -210,7 +210,7 @@ main { min-width: 0; padding: 2rem clamp(1.3rem, 3.4vw, 3.6rem) 5rem; }
 .capability-empty strong { color: var(--muted); font-size: .96rem; }
 .empty-glyph { color: var(--accent); font-family: var(--mono); font-size: 2.2rem; font-weight: 300; }
 .tool-results .form-actions { min-height: 41px; margin-top: .75rem; }
-.loading-card { min-height: 216px; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(105deg, var(--surface) 20%, var(--surface-raised) 47%, var(--surface) 74%); background-size: 220% 100%; animation: shimmer 1.35s ease infinite; }
+.loading-card { min-height: 168px; border: 1px solid var(--line); border-radius: 14px; background: linear-gradient(105deg, var(--surface) 20%, var(--surface-raised) 47%, var(--surface) 74%); background-size: 220% 100%; animation: shimmer 1.35s ease infinite; }
 .loading-list { display: grid; gap: .52rem; padding: .25rem 0; }
 .loading-row { height: 42px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: linear-gradient(105deg, var(--surface) 20%, var(--surface-raised) 47%, var(--surface) 74%); background-size: 220% 100%; animation: shimmer 1.35s ease infinite; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
@@ -261,6 +261,9 @@ pre { max-height: 560px; margin: 0; padding: 1rem; overflow: auto; border: 1px s
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
+@media (max-width: 1220px) {
+  .capability-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 960px) {
   .app-shell { grid-template-columns: 1fr; }

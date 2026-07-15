@@ -240,7 +240,7 @@ function loadingRows(count = 5) {
 function loadingCards() {
   const container = element("div", { className: "capability-viewport" });
   const grid = element("div", { className: "capability-grid" });
-  for (let index = 0; index < 4; index += 1) grid.append(element("div", { className: "loading-card" }));
+  for (let index = 0; index < 6; index += 1) grid.append(element("div", { className: "loading-card" }));
   container.append(grid);
   return container;
 }
