@@ -37,8 +37,8 @@ function showToast(message) {
   window.setTimeout(() => toast.classList.add("hidden"), 3500);
 }
 function setPage(title, eyebrow) {
-  $("#page-title").textContent = title;
-  $("#page-eyebrow").textContent = eyebrow;
+  $("#page-title").textContent = eyebrow;
+  $("#page-label").textContent = title;
   const section = (location.hash.split("/")[1] || "tools").split("?")[0];
   document.querySelectorAll("[data-nav]").forEach((item) => item.classList.toggle("active", item.dataset.nav === section));
 }
@@ -132,7 +132,7 @@ async function route() {
 }
 
 async function renderTools(view, offset = 0, search = "", includeUnready = false) {
-  setPage("工具", "CAPABILITY REGISTRY");
+  setPage("工具", "Capabilities");
   const searchInput = element("input", { type: "search", value: search, placeholder: "搜索名称或能力描述" });
   const include = element("input", { type: "checkbox" });
   include.checked = includeUnready;
@@ -276,7 +276,7 @@ function jobsTable(jobs) {
 }
 
 async function renderJobs(view, offset = 0, status = "") {
-  setPage("合成任务", "SYNTHESIS JOBS");
+  setPage("合成任务", "Synthesis Jobs");
   const select = element("select");
   [["", "全部状态"], ["queued", "排队中"], ["running", "处理中"], ["ready", "已就绪"], ["rejected", "已拒绝"]].forEach(([value, text]) => select.append(element("option", { value, text })));
   select.value = status;
@@ -300,7 +300,7 @@ async function renderJobs(view, offset = 0, status = "") {
 }
 
 async function renderJob(view, jobId) {
-  setPage("任务详情", "SYNTHESIS JOB");
+  setPage("任务详情", "Job Detail");
   const job = await api(`/v1/jobs/${encodeURIComponent(jobId)}`);
   const rows = definitionList([
     ["Job ID", job.job_id], ["工具", `${job.tool}@${job.revision}`], ["状态", job.status], ["阶段", job.stage],
@@ -326,7 +326,7 @@ async function renderTool(view, reference) {
   const at = reference.lastIndexOf("@");
   const name = at > 0 ? reference.slice(0, at) : reference;
   const revision = at > 0 ? Number(reference.slice(at + 1)) : null;
-  setPage(name, "TOOL CAPABILITY");
+  setPage("工具能力", name);
   const inspectUrl = revision ? `/v1/tools/${encodeURIComponent(name)}?revision=${revision}` : `/v1/tools/${encodeURIComponent(name)}`;
   const [tool, versions] = await Promise.all([api(inspectUrl), api(`/v1/tools/${encodeURIComponent(name)}/versions?limit=100&offset=0`)]);
   const selected = tool.selected;
@@ -459,7 +459,7 @@ async function revokeVersion(name, revision) {
 
 function renderRegister(view) {
   const query = new URLSearchParams(location.hash.split("?")[1] || "");
-  setPage(query.get("name") ? "注册新版本" : "注册工具", "SYNTHESIZE TOOL");
+  setPage(query.get("name") ? "注册新版本" : "注册工具", query.get("name") ? "Register Revision" : "Register Tool");
   const form = element("form", { className: "stack" });
   const name = element("input", { value: query.get("name") || "", placeholder: "例如 lscpu-summary", required: true });
   const intent = element("textarea", { placeholder: "描述要生成的确定性、无状态 Unix 工具能力", required: true });
