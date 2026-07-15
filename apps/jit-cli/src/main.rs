@@ -8,6 +8,7 @@ use std::{
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use clap::{Args, Parser, Subcommand};
+use jit_config::JitForgeConfig;
 use jit_protocol::{
     ErrorResponse, InvocationRequest, InvocationResponse, IoFormat, JobResponse, JobStatus,
     RegistrationRequest, RegistrationResponse, ToolExample, ToolListResponse, ToolSummaryResponse,
@@ -26,13 +27,11 @@ const DEFAULT_SERVER: &str = "http://127.0.0.1:8080";
     about = "Synthesize and call remote Unix-style tools"
 )]
 struct Cli {
-    #[arg(
-        long,
-        global = true,
-        env = "JITFORGE_SERVER",
-        default_value = DEFAULT_SERVER
-    )]
-    server: String,
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
+    #[arg(long, global = true, env = "JITFORGE_SERVER")]
+    server: Option<String>,
 
     #[arg(long, global = true, env = "JITFORGE_TOKEN", hide_env_values = true)]
     token: Option<String>,
@@ -160,15 +159,34 @@ async fn main() {
 }
 
 async fn run(cli: &Cli) -> CliResult<i32> {
+    let config = JitForgeConfig::load(cli.config.as_deref())
+        .map_err(|error| CliFailure::local(78, "invalid_config", error.to_string()))?;
     let token = cli
         .token
         .as_deref()
+        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| CliFailure::local(77, "missing_token", "JITFORGE_TOKEN is required"))?;
+        .or(config.auth.token.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            CliFailure::local(
+                77,
+                "missing_token",
+                "client token is required via --token, JITFORGE_TOKEN, or configuration",
+            )
+        })?;
     let client = reqwest::Client::builder().build().map_err(|error| {
         CliFailure::internal(format!("failed to initialize HTTP client: {error}"))
     })?;
-    let server = cli.server.trim_end_matches('/');
+    let server = cli
+        .server
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(config.client.server.as_deref())
+        .unwrap_or(DEFAULT_SERVER)
+        .trim_end_matches('/');
 
     match &cli.command {
         Command::Register {

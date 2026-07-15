@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, env, time::Duration};
+use std::{collections::BTreeSet, time::Duration};
 
 use async_trait::async_trait;
 use jit_artifact::{ToolContract, ToolTestCase};
@@ -132,12 +132,21 @@ pub struct OpenAiSynthesizer {
 }
 
 impl OpenAiSynthesizer {
-    pub fn from_env() -> Result<Self, SynthesisError> {
-        let base_url = required_env("JITFORGE_LLM_BASE_URL")?;
-        let api_key = required_env("JITFORGE_LLM_API_KEY")?;
-        let coder_model = required_env("JITFORGE_LLM_MODEL")?;
-        let verifier_model = required_env("JITFORGE_LLM_VERIFIER_MODEL")?;
-        let thinking = optional_thinking_env()?;
+    pub fn new(
+        base_url: Option<String>,
+        api_key: Option<String>,
+        coder_model: Option<String>,
+        verifier_model: Option<String>,
+        thinking: &str,
+    ) -> Result<Self, SynthesisError> {
+        let base_url = required_setting("JITFORGE_LLM_BASE_URL or llm.base_url", base_url)?;
+        let api_key = required_setting("JITFORGE_LLM_API_KEY or llm.api_key", api_key)?;
+        let coder_model = required_setting("JITFORGE_LLM_MODEL or llm.model", coder_model)?;
+        let verifier_model = required_setting(
+            "JITFORGE_LLM_VERIFIER_MODEL or llm.verifier_model",
+            verifier_model,
+        )?;
+        let thinking = parse_thinking(thinking)?;
         let client = openai::Client::builder()
             .api_key(api_key)
             .base_url(base_url.trim_end_matches('/'))
@@ -512,23 +521,20 @@ fn retryable(error: &CompletionError) -> bool {
         .unwrap_or(true)
 }
 
-fn required_env(name: &'static str) -> Result<String, SynthesisError> {
-    env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+fn required_setting(name: &'static str, value: Option<String>) -> Result<String, SynthesisError> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
         .ok_or(SynthesisError::MissingConfig(name))
 }
 
-fn optional_thinking_env() -> Result<Option<Value>, SynthesisError> {
-    match env::var("JITFORGE_LLM_THINKING")
-        .unwrap_or_else(|_| "auto".to_owned())
-        .trim()
-    {
+fn parse_thinking(value: &str) -> Result<Option<Value>, SynthesisError> {
+    match value.trim() {
         "" | "auto" => Ok(None),
         "disabled" => Ok(Some(json!({"thinking": {"type": "disabled"}}))),
         "enabled" => Ok(Some(json!({"thinking": {"type": "enabled"}}))),
         value => Err(SynthesisError::InvalidConfig(format!(
-            "JITFORGE_LLM_THINKING must be auto, enabled, or disabled; got {value:?}"
+            "LLM thinking must be auto, enabled, or disabled; got {value:?}"
         ))),
     }
 }

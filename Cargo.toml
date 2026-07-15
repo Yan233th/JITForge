@@ -4,6 +4,7 @@ members = [
     "apps/jit-server",
     "apps/jit-worker",
     "crates/jit-artifact",
+    "crates/jit-config",
     "crates/jit-domain",
     "crates/jit-protocol",
     "crates/jit-storage",
@@ -39,6 +40,7 @@ subtle = "2.6.1"
 thiserror = "2.0.12"
 tokio = { version = "1.45.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
+toml = "0.9.8"
 tonic = { version = "0.12.3", features = ["transport"] }
 tonic-build = "0.12.3"
 tower-http = { version = "0.6.6", features = ["request-id", "trace"] }

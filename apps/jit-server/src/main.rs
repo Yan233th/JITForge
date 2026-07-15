@@ -1,6 +1,6 @@
-use std::{env, net::SocketAddr};
+use std::net::SocketAddr;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Body,
@@ -11,6 +11,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use jit_config::{JitForgeConfig, nonempty_env};
 use jit_domain::{ToolDescription, ToolName};
 use jit_protocol::{
     ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, ReadyResponse,
@@ -89,31 +90,34 @@ async fn main() -> Result<()> {
 
 impl Config {
     fn from_env() -> Result<Self> {
-        let listen_addr = env::var("JITFORGE_LISTEN_ADDR")
-            .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_owned())
+        let config = JitForgeConfig::load(None).context("failed to load JITForge configuration")?;
+        let listen_addr = configured("JITFORGE_LISTEN_ADDR", config.server.listen_addr)
+            .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.to_owned())
             .parse::<SocketAddr>()
             .context("JITFORGE_LISTEN_ADDR must be a valid socket address")?;
-        let database_url =
-            env::var("JITFORGE_DATABASE_URL").unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned());
-        let auth_token =
-            env::var("JITFORGE_TOKEN").context("JITFORGE_TOKEN is required by jit-server")?;
-        if auth_token.trim().is_empty() {
-            bail!("JITFORGE_TOKEN must not be empty");
-        }
-        let worker_token = env::var("JITFORGE_WORKER_TOKEN")
-            .context("JITFORGE_WORKER_TOKEN is required by jit-server")?;
-        if worker_token.trim().is_empty() {
-            bail!("JITFORGE_WORKER_TOKEN must not be empty");
-        }
+        let database_url = configured("JITFORGE_DATABASE_URL", config.server.database_url)
+            .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_owned());
+        let auth_token = configured("JITFORGE_TOKEN", config.auth.token)
+            .context("client token is required in configuration or JITFORGE_TOKEN")?;
+        let worker_token = configured("JITFORGE_WORKER_TOKEN", config.auth.worker_token)
+            .context("worker token is required in configuration or JITFORGE_WORKER_TOKEN")?;
         Ok(Self {
             listen_addr,
             database_url,
             auth_token,
-            worker_endpoint: env::var("JITFORGE_WORKER_ENDPOINT")
-                .unwrap_or_else(|_| "http://127.0.0.1:50051".to_owned()),
+            worker_endpoint: configured("JITFORGE_WORKER_ENDPOINT", config.server.worker_endpoint)
+                .unwrap_or_else(|| "http://127.0.0.1:50051".to_owned()),
             worker_token,
         })
     }
+}
+
+fn configured(env_name: &str, file_value: Option<String>) -> Option<String> {
+    nonempty_env(env_name).or_else(|| {
+        file_value
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
 }
 
 fn build_router(state: AppState) -> Router {

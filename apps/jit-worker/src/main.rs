@@ -3,10 +3,11 @@ mod runner;
 mod service;
 mod synthesizer;
 
-use std::{env, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use jit_artifact::ArtifactStore;
+use jit_config::{JitForgeConfig, nonempty_env};
 use jit_protocol::worker::runner_server::RunnerServer;
 use jit_storage::Registry;
 use runner::DockerRunner;
@@ -31,6 +32,16 @@ struct Config {
     worker_id: String,
     docker_runtime: String,
     synthesizer_mode: String,
+    llm: LlmSettings,
+}
+
+#[derive(Debug)]
+struct LlmSettings {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    verifier_model: Option<String>,
+    thinking: String,
 }
 
 #[tokio::main]
@@ -78,7 +89,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    if let Some(synthesizer) = build_synthesizer(&config.synthesizer_mode)? {
+    if let Some(synthesizer) = build_synthesizer(&config.synthesizer_mode, &config.llm)? {
         let processor = jobs::JobProcessor::new(
             registry.clone(),
             artifact_store,
@@ -143,34 +154,60 @@ async fn cleanup_stale_state(registry: &Registry, store: &ArtifactStore, runner:
 
 impl Config {
     fn from_env() -> Result<Self> {
-        let worker_token =
-            env::var("JITFORGE_WORKER_TOKEN").context("JITFORGE_WORKER_TOKEN is required")?;
-        if worker_token.trim().is_empty() {
-            bail!("JITFORGE_WORKER_TOKEN must not be empty");
-        }
+        let config = JitForgeConfig::load(None).context("failed to load JITForge configuration")?;
+        let worker_token = configured("JITFORGE_WORKER_TOKEN", config.auth.worker_token)
+            .context("worker token is required in configuration or JITFORGE_WORKER_TOKEN")?;
         Ok(Self {
-            database_url: env::var("JITFORGE_DATABASE_URL")
-                .unwrap_or_else(|_| DEFAULT_DATABASE_URL.to_owned()),
-            listen_addr: env::var("JITFORGE_WORKER_LISTEN_ADDR")
-                .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.to_owned())
+            database_url: configured("JITFORGE_DATABASE_URL", config.worker.database_url)
+                .unwrap_or_else(|| DEFAULT_DATABASE_URL.to_owned()),
+            listen_addr: configured("JITFORGE_WORKER_LISTEN_ADDR", config.worker.listen_addr)
+                .unwrap_or_else(|| DEFAULT_LISTEN_ADDR.to_owned())
                 .parse()
                 .context("JITFORGE_WORKER_LISTEN_ADDR must be a socket address")?,
-            artifact_dir: env::var("JITFORGE_ARTIFACT_DIR")
-                .unwrap_or_else(|_| DEFAULT_ARTIFACT_DIR.to_owned()),
+            artifact_dir: configured("JITFORGE_ARTIFACT_DIR", config.worker.artifact_dir)
+                .unwrap_or_else(|| DEFAULT_ARTIFACT_DIR.to_owned()),
             worker_token,
-            worker_id: env::var("JITFORGE_WORKER_ID")
-                .unwrap_or_else(|_| format!("worker_{}", Uuid::now_v7())),
-            docker_runtime: env::var("JITFORGE_DOCKER_RUNTIME")
-                .unwrap_or_else(|_| "runsc".to_owned()),
-            synthesizer_mode: env::var("JITFORGE_SYNTHESIZER_MODE")
-                .unwrap_or_else(|_| "openai".to_owned()),
+            worker_id: configured("JITFORGE_WORKER_ID", config.worker.worker_id)
+                .unwrap_or_else(|| format!("worker_{}", Uuid::now_v7())),
+            docker_runtime: configured("JITFORGE_DOCKER_RUNTIME", config.worker.docker_runtime)
+                .unwrap_or_else(|| "runsc".to_owned()),
+            synthesizer_mode: configured(
+                "JITFORGE_SYNTHESIZER_MODE",
+                config.worker.synthesizer_mode,
+            )
+            .unwrap_or_else(|| "openai".to_owned()),
+            llm: LlmSettings {
+                base_url: configured("JITFORGE_LLM_BASE_URL", config.llm.base_url),
+                api_key: configured("JITFORGE_LLM_API_KEY", config.llm.api_key),
+                model: configured("JITFORGE_LLM_MODEL", config.llm.model),
+                verifier_model: configured(
+                    "JITFORGE_LLM_VERIFIER_MODEL",
+                    config.llm.verifier_model,
+                ),
+                thinking: configured("JITFORGE_LLM_THINKING", config.llm.thinking)
+                    .unwrap_or_else(|| "auto".to_owned()),
+            },
         })
     }
 }
 
-fn build_synthesizer(mode: &str) -> Result<Option<Arc<dyn Synthesizer>>> {
+fn configured(env_name: &str, file_value: Option<String>) -> Option<String> {
+    nonempty_env(env_name).or_else(|| {
+        file_value
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn build_synthesizer(mode: &str, llm: &LlmSettings) -> Result<Option<Arc<dyn Synthesizer>>> {
     match mode {
-        "openai" => Ok(Some(Arc::new(OpenAiSynthesizer::from_env()?))),
+        "openai" => Ok(Some(Arc::new(OpenAiSynthesizer::new(
+            llm.base_url.clone(),
+            llm.api_key.clone(),
+            llm.model.clone(),
+            llm.verifier_model.clone(),
+            &llm.thinking,
+        )?))),
         "fixture" => Ok(Some(Arc::new(FixtureSynthesizer))),
         "disabled" => Ok(None),
         other => bail!(

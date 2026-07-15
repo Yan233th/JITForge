@@ -9,6 +9,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 jit-artifact = { path = "../../crates/jit-artifact" }
+jit-config = { path = "../../crates/jit-config" }
 jit-protocol = { path = "../../crates/jit-protocol" }
 jit-storage = { path = "../../crates/jit-storage" }
 rig-core.workspace = true

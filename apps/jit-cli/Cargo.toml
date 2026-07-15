@@ -13,6 +13,7 @@ anyhow.workspace = true
 base64.workspace = true
 clap.workspace = true
 humantime.workspace = true
+jit-config = { path = "../../crates/jit-config" }
 jit-protocol = { path = "../../crates/jit-protocol" }
 reqwest.workspace = true
 serde.workspace = true
