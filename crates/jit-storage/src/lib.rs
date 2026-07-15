@@ -1,0 +1,1057 @@
+use std::{collections::HashSet, str::FromStr, time::Duration};
+
+use chrono::{DateTime, Utc};
+use jit_domain::{ToolName, ToolVersionStatus};
+use jit_protocol::{
+    IoFormat, JobError, JobResponse, JobStage, JobStatus, RegistrationRequest,
+    RegistrationResponse, ToolExample, ToolSummaryResponse, ToolVersionSummary,
+};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgPoolOptions};
+use thiserror::Error;
+use uuid::Uuid;
+
+static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
+
+const AGENT_TRACE_LIMIT_BYTES: i64 = 512 * 1024;
+const AGENT_EVENT_PAYLOAD_LIMIT_BYTES: usize = 16 * 1024;
+const AGENT_TERMINAL_EVENT_RESERVE_BYTES: i64 = 512;
+
+#[derive(Clone)]
+pub struct Registry {
+    pool: PgPool,
+}
+
+impl Registry {
+    pub async fn connect(database_url: &str, max_connections: u32) -> Result<Self, StorageError> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(database_url)
+            .await?;
+        Ok(Self { pool })
+    }
+
+    pub fn from_pool(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub async fn migrate(&self) -> Result<(), StorageError> {
+        MIGRATOR.run(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn database_ready(&self) -> bool {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .is_ok()
+    }
+
+    pub async fn has_recent_worker(&self) -> Result<bool, StorageError> {
+        let present = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM worker_heartbeats WHERE last_seen_at > now() - interval '30 seconds')",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(present)
+    }
+
+    pub async fn register(
+        &self,
+        name: &ToolName,
+        request: &RegistrationRequest,
+        idempotency_key: &str,
+    ) -> Result<RegistrationResponse, StorageError> {
+        let fingerprint = registration_fingerprint(name, request)?;
+        let mut transaction = self.pool.begin().await?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(idempotency_key)
+            .execute(&mut *transaction)
+            .await?;
+
+        if let Some(row) = sqlx::query(
+            "SELECT j.request_fingerprint, j.id, t.name, j.revision, v.status
+             FROM synthesis_jobs j
+             JOIN tools t ON t.id = j.tool_id
+             JOIN tool_versions v ON v.tool_id = j.tool_id AND v.revision = j.revision
+             WHERE j.idempotency_key = $1",
+        )
+        .bind(idempotency_key)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            let stored_fingerprint: String = row.try_get("request_fingerprint")?;
+            if stored_fingerprint != fingerprint {
+                return Err(StorageError::IdempotencyConflict);
+            }
+            let response = RegistrationResponse {
+                tool: row.try_get("name")?,
+                revision: to_u64(row.try_get::<i64, _>("revision")?, "revision")?,
+                status: parse_version_status(row.try_get("status")?)?,
+                job_id: row.try_get::<Uuid, _>("id")?.to_string(),
+            };
+            transaction.commit().await?;
+            return Ok(response);
+        }
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 1))")
+            .bind(name.as_str())
+            .execute(&mut *transaction)
+            .await?;
+
+        let tool_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO tools (id, name) VALUES ($1, $2)
+             ON CONFLICT (name) DO NOTHING",
+        )
+        .bind(tool_id)
+        .bind(name.as_str())
+        .execute(&mut *transaction)
+        .await?;
+
+        let row = sqlx::query("SELECT id, latest_revision FROM tools WHERE name = $1 FOR UPDATE")
+            .bind(name.as_str())
+            .fetch_one(&mut *transaction)
+            .await?;
+        let tool_id: Uuid = row.try_get("id")?;
+        let latest_revision: i64 = row.try_get("latest_revision")?;
+        let revision = latest_revision
+            .checked_add(1)
+            .ok_or_else(|| StorageError::Invariant("revision overflow".to_owned()))?;
+
+        sqlx::query("UPDATE tools SET latest_revision = $2, updated_at = now() WHERE id = $1")
+            .bind(tool_id)
+            .bind(revision)
+            .execute(&mut *transaction)
+            .await?;
+
+        sqlx::query(
+            "INSERT INTO tool_versions
+             (tool_id, revision, description, input_format, output_format, examples, status)
+             VALUES ($1, $2, $3, $4, $5, $6, 'draft')",
+        )
+        .bind(tool_id)
+        .bind(revision)
+        .bind(&request.description)
+        .bind(request.input_format.as_str())
+        .bind(request.output_format.as_str())
+        .bind(serde_json::to_value(&request.examples)?)
+        .execute(&mut *transaction)
+        .await?;
+
+        let job_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO synthesis_jobs
+             (id, tool_id, revision, idempotency_key, request_fingerprint, status, stage)
+             VALUES ($1, $2, $3, $4, $5, 'queued', 'queued')",
+        )
+        .bind(job_id)
+        .bind(tool_id)
+        .bind(revision)
+        .bind(idempotency_key)
+        .bind(fingerprint)
+        .execute(&mut *transaction)
+        .await?;
+
+        transaction.commit().await?;
+        Ok(RegistrationResponse {
+            tool: name.to_string(),
+            revision: to_u64(revision, "revision")?,
+            status: ToolVersionStatus::Draft,
+            job_id: job_id.to_string(),
+        })
+    }
+
+    pub async fn get_job(&self, job_id: Uuid) -> Result<JobResponse, StorageError> {
+        let row = sqlx::query(
+            "SELECT j.id, t.name, j.revision, j.status AS job_status, j.stage,
+                    v.status AS version_status, j.error_code, j.error_message, j.details,
+                    j.created_at, j.updated_at
+             FROM synthesis_jobs j
+             JOIN tools t ON t.id = j.tool_id
+             JOIN tool_versions v ON v.tool_id = j.tool_id AND v.revision = j.revision
+             WHERE j.id = $1",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::JobNotFound)?;
+        map_job(row)
+    }
+
+    pub async fn inspect_tool(
+        &self,
+        name: &ToolName,
+        requested_revision: Option<u64>,
+    ) -> Result<ToolSummaryResponse, StorageError> {
+        let tool =
+            sqlx::query("SELECT id, latest_revision, stable_revision FROM tools WHERE name = $1")
+                .bind(name.as_str())
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or(StorageError::ToolNotFound)?;
+
+        let tool_id: Uuid = tool.try_get("id")?;
+        let latest_revision = to_u64(tool.try_get("latest_revision")?, "latest_revision")?;
+        let stable_revision = tool
+            .try_get::<Option<i64>, _>("stable_revision")?
+            .map(|value| to_u64(value, "stable_revision"))
+            .transpose()?;
+        let selected_revision = requested_revision
+            .or(stable_revision)
+            .unwrap_or(latest_revision);
+        let selected_revision_i64 = i64::try_from(selected_revision).map_err(|_| {
+            StorageError::Invariant("revision exceeds PostgreSQL BIGINT".to_owned())
+        })?;
+
+        let version = sqlx::query(
+            "SELECT revision, description, status, input_format, output_format, assumptions,
+                    contract, artifact_digest, validation_summary, error_code, error_message
+             FROM tool_versions WHERE tool_id = $1 AND revision = $2",
+        )
+        .bind(tool_id)
+        .bind(selected_revision_i64)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::VersionNotFound)?;
+
+        let assumptions: Value = version.try_get("assumptions")?;
+        let error_code: Option<String> = version.try_get("error_code")?;
+        let error_message: Option<String> = version.try_get("error_message")?;
+        let error = match (error_code, error_message) {
+            (Some(code), Some(message)) => Some(JobError {
+                code,
+                message,
+                details: None,
+            }),
+            _ => None,
+        };
+
+        Ok(ToolSummaryResponse {
+            tool: name.to_string(),
+            stable_revision,
+            latest_revision,
+            selected: ToolVersionSummary {
+                revision: to_u64(version.try_get("revision")?, "revision")?,
+                description: version.try_get("description")?,
+                status: parse_version_status(version.try_get("status")?)?,
+                input_format: parse_io_format(version.try_get("input_format")?)?,
+                output_format: parse_io_format(version.try_get("output_format")?)?,
+                assumptions: serde_json::from_value(assumptions)?,
+                contract: version.try_get("contract")?,
+                artifact_digest: version.try_get("artifact_digest")?,
+                validation_summary: version.try_get("validation_summary")?,
+                error,
+            },
+        })
+    }
+
+    pub async fn record_worker_heartbeat(
+        &self,
+        worker_id: &str,
+        version: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO worker_heartbeats (worker_id, version, last_seen_at)
+             VALUES ($1, $2, now())
+             ON CONFLICT (worker_id) DO UPDATE
+             SET version = excluded.version, last_seen_at = excluded.last_seen_at",
+        )
+        .bind(worker_id)
+        .bind(version)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn claim_synthesis_job(
+        &self,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<Option<ClaimedSynthesisJob>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let candidate = sqlx::query(
+            "SELECT id FROM synthesis_jobs
+             WHERE (status = 'queued' AND available_at <= now())
+                OR (status = 'running' AND lease_until < now())
+             ORDER BY created_at
+             FOR UPDATE SKIP LOCKED
+             LIMIT 1",
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(candidate) = candidate else {
+            transaction.commit().await?;
+            return Ok(None);
+        };
+        let job_id: Uuid = candidate.try_get("id")?;
+
+        sqlx::query(
+            "UPDATE synthesis_jobs
+             SET status = 'running',
+                 stage = CASE WHEN status = 'queued' THEN 'contract' ELSE stage END,
+                 attempts = attempts + 1,
+                 worker_id = $2,
+                 lease_until = now() + ($3::bigint * interval '1 second'),
+                 updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .bind(lease_seconds)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE tool_versions v SET status = 'synthesizing', updated_at = now()
+             FROM synthesis_jobs j
+             WHERE j.id = $1 AND v.tool_id = j.tool_id AND v.revision = j.revision
+               AND v.status IN ('draft', 'contract_ready', 'synthesizing')",
+        )
+        .bind(job_id)
+        .execute(&mut *transaction)
+        .await?;
+
+        let row = sqlx::query(
+            "SELECT j.id, j.tool_id, t.name, j.revision, j.attempts,
+                    v.description, v.input_format, v.output_format, v.examples,
+                    ar.engine AS agent_engine, ar.engine_version AS agent_engine_version,
+                    ar.checkpoint AS agent_checkpoint
+             FROM synthesis_jobs j
+             JOIN tools t ON t.id = j.tool_id
+             JOIN tool_versions v ON v.tool_id = j.tool_id AND v.revision = j.revision
+             LEFT JOIN synthesis_agent_runs ar ON ar.job_id = j.id
+             WHERE j.id = $1",
+        )
+        .bind(job_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let examples: Value = row.try_get("examples")?;
+        let agent_engine: Option<String> = row.try_get("agent_engine")?;
+        let agent_engine_version: Option<String> = row.try_get("agent_engine_version")?;
+        let agent_checkpoint: Option<Value> = row.try_get("agent_checkpoint")?;
+        let agent_checkpoint = match (agent_engine, agent_engine_version, agent_checkpoint) {
+            (Some(engine), Some(engine_version), Some(checkpoint)) => Some(AgentCheckpointRecord {
+                engine,
+                engine_version,
+                checkpoint,
+            }),
+            (None, None, None) => None,
+            _ => {
+                return Err(StorageError::Invariant(
+                    "partial synthesis agent checkpoint".to_owned(),
+                ));
+            }
+        };
+        let claimed = ClaimedSynthesisJob {
+            job_id,
+            tool_id: row.try_get("tool_id")?,
+            tool: row.try_get("name")?,
+            revision: to_u64(row.try_get("revision")?, "revision")?,
+            description: row.try_get("description")?,
+            input_format: parse_io_format(row.try_get("input_format")?)?,
+            output_format: parse_io_format(row.try_get("output_format")?)?,
+            examples: serde_json::from_value(examples)?,
+            attempts: row.try_get::<i32, _>("attempts")? as u32,
+            agent_checkpoint,
+        };
+        transaction.commit().await?;
+        Ok(Some(claimed))
+    }
+
+    pub async fn renew_job_lease(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        lease_seconds: i64,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE synthesis_jobs
+             SET lease_until = now() + ($3::bigint * interval '1 second'), updated_at = now()
+             WHERE id = $1 AND worker_id = $2 AND status = 'running'",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .bind(lease_seconds)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::JobLeaseLost);
+        }
+        Ok(())
+    }
+
+    pub async fn save_agent_checkpoint(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        engine: &str,
+        engine_version: &str,
+        checkpoint: &Value,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        ensure_job_owner(&mut transaction, job_id, worker_id).await?;
+        sqlx::query(
+            "INSERT INTO synthesis_agent_runs
+             (job_id, engine, engine_version, checkpoint)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (job_id) DO UPDATE
+             SET engine = excluded.engine,
+                 engine_version = excluded.engine_version,
+                 checkpoint = excluded.checkpoint,
+                 updated_at = now()",
+        )
+        .bind(job_id)
+        .bind(engine)
+        .bind(engine_version)
+        .bind(checkpoint)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn append_agent_event(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        kind: &str,
+        payload: &Value,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        ensure_job_owner(&mut transaction, job_id, worker_id).await?;
+        append_agent_event_in_transaction(
+            &mut transaction,
+            job_id,
+            kind,
+            payload,
+            AGENT_TRACE_LIMIT_BYTES - AGENT_TERMINAL_EVENT_RESERVE_BYTES,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn referenced_artifacts(
+        &self,
+    ) -> Result<(HashSet<String>, HashSet<String>), StorageError> {
+        self.referenced_artifacts_inner(None).await
+    }
+
+    pub async fn referenced_artifacts_excluding_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<(HashSet<String>, HashSet<String>), StorageError> {
+        self.referenced_artifacts_inner(Some(job_id)).await
+    }
+
+    async fn referenced_artifacts_inner(
+        &self,
+        excluded_job_id: Option<Uuid>,
+    ) -> Result<(HashSet<String>, HashSet<String>), StorageError> {
+        let rows = sqlx::query("SELECT digest, manifest FROM artifacts")
+            .fetch_all(&self.pool)
+            .await?;
+        let mut digests = HashSet::new();
+        let mut sources = HashSet::new();
+        for row in rows {
+            digests.insert(row.try_get::<String, _>("digest")?);
+            let manifest: Value = row.try_get("manifest")?;
+            if let Some(source) = manifest.get("source_sha256").and_then(Value::as_str) {
+                sources.insert(source.to_owned());
+            }
+        }
+        let active = sqlx::query(
+            "SELECT ar.checkpoint
+             FROM synthesis_agent_runs ar
+             JOIN synthesis_jobs j ON j.id = ar.job_id
+             WHERE j.status = 'running'
+               AND ($1::uuid IS NULL OR j.id <> $1)",
+        )
+        .bind(excluded_job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        for row in active {
+            let checkpoint: Value = row.try_get("checkpoint")?;
+            if let Some(values) = checkpoint
+                .pointer("/workspace/candidate_digests")
+                .and_then(Value::as_array)
+            {
+                digests.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+            if let Some(values) = checkpoint
+                .pointer("/workspace/candidate_sources")
+                .and_then(Value::as_array)
+            {
+                sources.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+        }
+        Ok((digests, sources))
+    }
+
+    pub async fn compact_agent_traces(&self) -> Result<u64, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let archived = sqlx::query(
+            "INSERT INTO synthesis_agent_trace_archives (job_id, event_count, events)
+             SELECT e.job_id, count(*)::integer,
+                    jsonb_agg(jsonb_build_object(
+                        'id', e.id,
+                        'kind', e.kind,
+                        'payload', e.payload,
+                        'created_at', e.created_at
+                    ) ORDER BY e.id)
+             FROM synthesis_agent_events e
+             JOIN synthesis_jobs j ON j.id = e.job_id
+             WHERE j.status IN ('ready', 'rejected')
+               AND j.updated_at < now() - interval '7 days'
+             GROUP BY e.job_id
+             ON CONFLICT (job_id) DO NOTHING",
+        )
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        sqlx::query(
+            "DELETE FROM synthesis_agent_events e
+             USING synthesis_agent_trace_archives a
+             WHERE e.job_id = a.job_id",
+        )
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(archived)
+    }
+
+    pub async fn set_job_stage(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        stage: JobStage,
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE synthesis_jobs
+             SET stage = $3, lease_until = now() + interval '300 seconds', updated_at = now()
+             WHERE id = $1 AND worker_id = $2 AND status = 'running'",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .bind(stage.as_str())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::JobLeaseLost);
+        }
+        let version_status = match stage {
+            JobStage::Building => Some("building"),
+            JobStage::Validating => Some("validating"),
+            JobStage::Contract | JobStage::Synthesizing | JobStage::Repairing => {
+                Some("synthesizing")
+            }
+            JobStage::Queued | JobStage::Complete => None,
+        };
+        if let Some(version_status) = version_status {
+            sqlx::query(
+                "UPDATE tool_versions v SET status = $2, updated_at = now()
+                 FROM synthesis_jobs j
+                 WHERE j.id = $1 AND v.tool_id = j.tool_id AND v.revision = j.revision",
+            )
+            .bind(job_id)
+            .bind(version_status)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn save_contract(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        contract: &Value,
+        assumptions: &[String],
+    ) -> Result<(), StorageError> {
+        let result = sqlx::query(
+            "UPDATE tool_versions v
+             SET contract = $3, assumptions = $4, updated_at = now()
+             FROM synthesis_jobs j
+             WHERE j.id = $1 AND j.worker_id = $2 AND j.status = 'running'
+               AND v.tool_id = j.tool_id AND v.revision = j.revision",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .bind(contract)
+        .bind(serde_json::to_value(assumptions)?)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::JobLeaseLost);
+        }
+        Ok(())
+    }
+
+    pub async fn publish_job(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        artifact: &PublishedArtifact,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let owner = sqlx::query(
+            "SELECT tool_id, revision FROM synthesis_jobs
+             WHERE id = $1 AND worker_id = $2 AND status = 'running'
+             FOR UPDATE",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::JobLeaseLost)?;
+        let tool_id: Uuid = owner.try_get("tool_id")?;
+        let revision: i64 = owner.try_get("revision")?;
+
+        sqlx::query(
+            "INSERT INTO artifacts (digest, relative_path, size_bytes, manifest, validation_summary)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (digest) DO NOTHING",
+        )
+        .bind(&artifact.digest)
+        .bind(&artifact.relative_path)
+        .bind(artifact.size_bytes)
+        .bind(&artifact.manifest)
+        .bind(&artifact.validation_summary)
+        .execute(&mut *transaction)
+        .await?;
+
+        sqlx::query(
+            "UPDATE tool_versions
+             SET status = 'ready', contract = $3, assumptions = $4,
+                 artifact_digest = $5, validation_summary = $6,
+                 error_code = NULL, error_message = NULL, updated_at = now()
+             WHERE tool_id = $1 AND revision = $2",
+        )
+        .bind(tool_id)
+        .bind(revision)
+        .bind(&artifact.contract)
+        .bind(&artifact.assumptions)
+        .bind(&artifact.digest)
+        .bind(&artifact.validation_summary)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("UPDATE tools SET stable_revision = $2, updated_at = now() WHERE id = $1")
+            .bind(tool_id)
+            .bind(revision)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "UPDATE synthesis_jobs
+             SET status = 'ready', stage = 'complete', lease_until = NULL, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(&mut *transaction)
+        .await?;
+        append_agent_event_in_transaction(
+            &mut transaction,
+            job_id,
+            "candidate_validated",
+            &serde_json::json!({"digest": artifact.digest}),
+            AGENT_TRACE_LIMIT_BYTES,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn reject_job(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        code: &str,
+        message: &str,
+        details: Option<&Value>,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE synthesis_jobs
+             SET status = 'rejected', stage = 'complete', error_code = $3,
+                 error_message = $4, details = $5, lease_until = NULL, updated_at = now()
+             WHERE id = $1 AND worker_id = $2 AND status = 'running'",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .bind(code)
+        .bind(message)
+        .bind(details)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::JobLeaseLost);
+        }
+        sqlx::query(
+            "UPDATE tool_versions v
+             SET status = 'rejected', error_code = $2, error_message = $3, updated_at = now()
+             FROM synthesis_jobs j
+             WHERE j.id = $1 AND v.tool_id = j.tool_id AND v.revision = j.revision",
+        )
+        .bind(job_id)
+        .bind(code)
+        .bind(message)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub async fn resolve_tool(
+        &self,
+        name: &ToolName,
+        requested_revision: Option<u64>,
+    ) -> Result<ResolvedTool, StorageError> {
+        let revision = requested_revision
+            .map(i64::try_from)
+            .transpose()
+            .map_err(|_| StorageError::VersionNotFound)?;
+        let row = sqlx::query(
+            "SELECT t.id AS tool_id, COALESCE($2, t.stable_revision) AS selected_revision,
+                    v.status, v.artifact_digest, v.input_format, v.output_format
+             FROM tools t
+             LEFT JOIN tool_versions v
+               ON v.tool_id = t.id AND v.revision = COALESCE($2, t.stable_revision)
+             WHERE t.name = $1",
+        )
+        .bind(name.as_str())
+        .bind(revision)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StorageError::ToolNotFound)?;
+        let selected_revision: Option<i64> = row.try_get("selected_revision")?;
+        let selected_revision = selected_revision.ok_or(StorageError::ToolNotReady)?;
+        let status: Option<String> = row.try_get("status")?;
+        if status.as_deref() != Some("ready") {
+            return Err(StorageError::ToolNotReady);
+        }
+        Ok(ResolvedTool {
+            tool_id: row.try_get("tool_id")?,
+            revision: to_u64(selected_revision, "revision")?,
+            artifact_digest: row
+                .try_get::<Option<String>, _>("artifact_digest")?
+                .ok_or_else(|| {
+                    StorageError::Invariant("ready version has no artifact".to_owned())
+                })?,
+            input_format: parse_io_format(
+                row.try_get::<Option<String>, _>("input_format")?
+                    .ok_or_else(|| {
+                        StorageError::Invariant("ready version has no input format".to_owned())
+                    })?,
+            )?,
+            output_format: parse_io_format(
+                row.try_get::<Option<String>, _>("output_format")?
+                    .ok_or_else(|| {
+                        StorageError::Invariant("ready version has no output format".to_owned())
+                    })?,
+            )?,
+        })
+    }
+
+    pub async fn start_invocation(
+        &self,
+        invocation_id: Uuid,
+        resolved: &ResolvedTool,
+        stdin_size: u64,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO invocations
+             (id, tool_id, revision, artifact_digest, status, stdin_size)
+             VALUES ($1, $2, $3, $4, 'running', $5)",
+        )
+        .bind(invocation_id)
+        .bind(resolved.tool_id)
+        .bind(i64::try_from(resolved.revision).map_err(|_| StorageError::VersionNotFound)?)
+        .bind(&resolved.artifact_digest)
+        .bind(i64::try_from(stdin_size).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn finish_invocation(
+        &self,
+        invocation_id: Uuid,
+        status: &str,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        stdout_size: usize,
+        stderr_size: usize,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE invocations
+             SET status = $2, exit_code = $3, duration_ms = $4,
+                 stdout_size = $5, stderr_size = $6, finished_at = now()
+             WHERE id = $1",
+        )
+        .bind(invocation_id)
+        .bind(status)
+        .bind(exit_code)
+        .bind(i64::try_from(duration_ms).unwrap_or(i64::MAX))
+        .bind(i64::try_from(stdout_size).unwrap_or(i64::MAX))
+        .bind(i64::try_from(stderr_size).unwrap_or(i64::MAX))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+async fn ensure_job_owner(
+    transaction: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    worker_id: &str,
+) -> Result<(), StorageError> {
+    let owned = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM synthesis_jobs
+            WHERE id = $1 AND worker_id = $2 AND status IN ('running', 'ready')
+        )",
+    )
+    .bind(job_id)
+    .bind(worker_id)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if !owned {
+        return Err(StorageError::JobLeaseLost);
+    }
+    Ok(())
+}
+
+async fn append_agent_event_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    job_id: Uuid,
+    kind: &str,
+    payload: &Value,
+    trace_limit_bytes: i64,
+) -> Result<(), StorageError> {
+    let (payload, payload_size) = bounded_event_payload(payload)?;
+    let trace_bytes: i64 = sqlx::query_scalar(
+        "SELECT trace_bytes FROM synthesis_agent_runs WHERE job_id = $1 FOR UPDATE",
+    )
+    .bind(job_id)
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or_else(|| StorageError::Invariant("agent run missing before event".to_owned()))?;
+    let remaining = trace_limit_bytes.saturating_sub(trace_bytes);
+    let (payload, payload_size) = if i64::from(payload_size) <= remaining {
+        (payload, payload_size)
+    } else {
+        let omitted = serde_json::json!({
+            "omitted": true,
+            "reason": "agent trace byte budget exhausted"
+        });
+        let size = i32::try_from(serde_json::to_vec(&omitted)?.len()).unwrap_or(i32::MAX);
+        if i64::from(size) > remaining {
+            return Ok(());
+        }
+        (omitted, size)
+    };
+    sqlx::query(
+        "INSERT INTO synthesis_agent_events (job_id, kind, payload, payload_size)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(job_id)
+    .bind(kind)
+    .bind(payload)
+    .bind(payload_size)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE synthesis_agent_runs
+         SET trace_bytes = trace_bytes + $2, updated_at = now()
+         WHERE job_id = $1",
+    )
+    .bind(job_id)
+    .bind(i64::from(payload_size))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+fn bounded_event_payload(payload: &Value) -> Result<(Value, i32), StorageError> {
+    let encoded = serde_json::to_vec(payload)?;
+    if encoded.len() <= AGENT_EVENT_PAYLOAD_LIMIT_BYTES {
+        return Ok((
+            payload.clone(),
+            i32::try_from(encoded.len()).unwrap_or(i32::MAX),
+        ));
+    }
+    let bounded = serde_json::json!({
+        "omitted": true,
+        "bytes": encoded.len(),
+        "sha256": hex::encode(Sha256::digest(&encoded)),
+        "reason": "event payload exceeded 16 KiB"
+    });
+    let size = i32::try_from(serde_json::to_vec(&bounded)?.len()).unwrap_or(i32::MAX);
+    Ok((bounded, size))
+}
+
+#[derive(Clone, Debug)]
+pub struct ClaimedSynthesisJob {
+    pub job_id: Uuid,
+    pub tool_id: Uuid,
+    pub tool: String,
+    pub revision: u64,
+    pub description: String,
+    pub input_format: IoFormat,
+    pub output_format: IoFormat,
+    pub examples: Vec<ToolExample>,
+    pub attempts: u32,
+    pub agent_checkpoint: Option<AgentCheckpointRecord>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AgentCheckpointRecord {
+    pub engine: String,
+    pub engine_version: String,
+    pub checkpoint: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct PublishedArtifact {
+    pub digest: String,
+    pub relative_path: String,
+    pub size_bytes: i64,
+    pub manifest: Value,
+    pub contract: Value,
+    pub assumptions: Value,
+    pub validation_summary: Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct ResolvedTool {
+    pub tool_id: Uuid,
+    pub revision: u64,
+    pub artifact_digest: String,
+    pub input_format: IoFormat,
+    pub output_format: IoFormat,
+}
+
+pub fn registration_fingerprint(
+    name: &ToolName,
+    request: &RegistrationRequest,
+) -> Result<String, StorageError> {
+    let mut hasher = Sha256::new();
+    hasher.update(name.as_str().as_bytes());
+    hasher.update([0]);
+    hasher.update(serde_json::to_vec(request)?);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn map_job(row: sqlx::postgres::PgRow) -> Result<JobResponse, StorageError> {
+    let error_code: Option<String> = row.try_get("error_code")?;
+    let error_message: Option<String> = row.try_get("error_message")?;
+    let details: Option<Value> = row.try_get("details")?;
+    let error = match (error_code, error_message) {
+        (Some(code), Some(message)) => Some(JobError {
+            code,
+            message,
+            details,
+        }),
+        _ => None,
+    };
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
+    Ok(JobResponse {
+        job_id: row.try_get::<Uuid, _>("id")?.to_string(),
+        tool: row.try_get("name")?,
+        revision: to_u64(row.try_get("revision")?, "revision")?,
+        status: parse_job_status(row.try_get("job_status")?)?,
+        stage: parse_job_stage(row.try_get("stage")?)?,
+        version_status: parse_version_status(row.try_get("version_status")?)?,
+        error,
+        created_at: created_at.to_rfc3339(),
+        updated_at: updated_at.to_rfc3339(),
+    })
+}
+
+fn parse_version_status(value: String) -> Result<ToolVersionStatus, StorageError> {
+    ToolVersionStatus::from_str(&value).map_err(|error| StorageError::Invariant(error.to_string()))
+}
+
+fn parse_job_status(value: String) -> Result<JobStatus, StorageError> {
+    JobStatus::parse(&value)
+        .ok_or_else(|| StorageError::Invariant(format!("unknown job status {value:?}")))
+}
+
+fn parse_job_stage(value: String) -> Result<JobStage, StorageError> {
+    JobStage::parse(&value)
+        .ok_or_else(|| StorageError::Invariant(format!("unknown job stage {value:?}")))
+}
+
+fn parse_io_format(value: String) -> Result<IoFormat, StorageError> {
+    IoFormat::parse(&value)
+        .ok_or_else(|| StorageError::Invariant(format!("unknown I/O format {value:?}")))
+}
+
+fn to_u64(value: i64, field: &str) -> Result<u64, StorageError> {
+    u64::try_from(value)
+        .map_err(|_| StorageError::Invariant(format!("{field} must not be negative")))
+}
+
+#[derive(Debug, Error)]
+pub enum StorageError {
+    #[error("tool not found")]
+    ToolNotFound,
+
+    #[error("tool version not found")]
+    VersionNotFound,
+
+    #[error("synthesis job not found")]
+    JobNotFound,
+
+    #[error("idempotency key was already used for a different request")]
+    IdempotencyConflict,
+
+    #[error("tool has no ready version")]
+    ToolNotReady,
+
+    #[error("synthesis job lease was lost")]
+    JobLeaseLost,
+
+    #[error("registry invariant violated: {0}")]
+    Invariant(String),
+
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+
+    #[error(transparent)]
+    Migration(#[from] sqlx::migrate::MigrateError),
+
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jit_protocol::ToolExample;
+
+    #[test]
+    fn registration_fingerprint_is_stable_and_payload_sensitive() {
+        let name = ToolName::from_str("slugify").unwrap();
+        let mut request = RegistrationRequest {
+            description: "make a slug".to_owned(),
+            input_format: IoFormat::Text,
+            output_format: IoFormat::Text,
+            examples: vec![ToolExample {
+                input: "Hello".to_owned(),
+                output: "hello".to_owned(),
+            }],
+        };
+        let first = registration_fingerprint(&name, &request).unwrap();
+        assert_eq!(first, registration_fingerprint(&name, &request).unwrap());
+        request.description.push('!');
+        assert_ne!(first, registration_fingerprint(&name, &request).unwrap());
+    }
+}

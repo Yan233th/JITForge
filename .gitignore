@@ -1,0 +1,11 @@
+/target/
+/.data/
+.env
+.env.*
+!.env.example
+*.db
+*.log
+.DS_Store
+.idea/
+.vscode/
+coverage/

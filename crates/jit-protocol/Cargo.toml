@@ -1,0 +1,15 @@
+[package]
+name = "jit-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+jit-domain = { path = "../jit-domain" }
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tonic.workspace = true
+
+[build-dependencies]
+tonic-build.workspace = true

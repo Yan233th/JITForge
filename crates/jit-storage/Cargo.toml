@@ -1,0 +1,16 @@
+[package]
+name = "jit-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hex.workspace = true
+jit-domain = { path = "../jit-domain" }
+jit-protocol = { path = "../jit-protocol" }
+serde_json.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

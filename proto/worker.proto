@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package jitforge.worker.v1;
+
+service Runner {
+  rpc Execute(ExecuteRequest) returns (ExecuteResponse);
+}
+
+message ExecuteRequest {
+  string invocation_id = 1;
+  string artifact_digest = 2;
+  repeated string args = 3;
+  bytes stdin = 4;
+  uint64 timeout_ms = 5;
+}
+
+message ExecuteResponse {
+  int32 exit_code = 1;
+  bytes stdout = 2;
+  bytes stderr = 3;
+  uint64 duration_ms = 4;
+}
