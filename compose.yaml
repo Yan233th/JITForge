@@ -28,6 +28,8 @@ services:
       context: .
       dockerfile: deployments/compose/Dockerfile
       target: worker
+      args:
+        JITFORGE_BUILD_PROFILE: ${JITFORGE_BUILD_PROFILE:-debug}
     environment:
       JITFORGE_DATABASE_URL: postgres://jitforge:jitforge@postgres:5432/jitforge
       JITFORGE_WORKER_LISTEN_ADDR: 0.0.0.0:50051
@@ -63,6 +65,9 @@ services:
       context: .
       dockerfile: deployments/compose/Dockerfile
       target: server
+      args:
+        JITFORGE_BUILD_PROFILE: ${JITFORGE_BUILD_PROFILE:-debug}
+    user: ${JITFORGE_SERVER_USER:-65532:65532}
     environment:
       JITFORGE_LISTEN_ADDR: 0.0.0.0:8080
       JITFORGE_DATABASE_URL: postgres://jitforge:jitforge@postgres:5432/jitforge

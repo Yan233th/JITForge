@@ -3,6 +3,10 @@ target/*
 target/release/*
 !target/release/jit-server
 !target/release/jit-worker
+!target/debug/
+target/debug/*
+!target/debug/jit-server
+!target/debug/jit-worker
 .git/
 .data/
 .env
