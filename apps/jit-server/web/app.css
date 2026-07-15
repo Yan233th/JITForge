@@ -157,7 +157,7 @@ main { min-width: 0; padding: 1.55rem clamp(1.25rem, 3.2vw, 3rem) 4rem; }
 .panel + .panel { margin-top: 1rem; }
 .panel-header { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .72rem 1rem; border-bottom: 1px solid var(--border); background: var(--surface-raised); }
 .panel-header h2, .panel-header h3 { margin: 0; font-size: .88rem; letter-spacing: -.01em; }
-.panel-meta { color: var(--muted); font-size: .74rem; font-variant-numeric: tabular-nums; }
+.panel-meta { min-width: 82px; color: var(--muted); font-size: .74rem; font-variant-numeric: tabular-nums; text-align: right; }
 .panel-body { padding: 1rem; }
 .panel-body > form.stack { max-width: 920px; }
 .toolbar { min-height: 40px; display: flex; flex-wrap: wrap; align-items: center; gap: .62rem; margin-bottom: .9rem; }
@@ -170,6 +170,10 @@ main { min-width: 0; padding: 1.55rem clamp(1.25rem, 3.2vw, 3rem) 4rem; }
 
 .results-region { min-height: 124px; transition: opacity .14s ease; }
 .results-region.updating { opacity: .56; }
+.tool-results { min-height: 472px; }
+.tool-results .table-wrap { height: 414px; overflow: auto; }
+.tool-results th { position: sticky; top: 0; z-index: 1; }
+.tool-results .form-actions { min-height: 40px; margin-top: .7rem; }
 .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
 table { width: 100%; border-collapse: collapse; table-layout: auto; }
 th, td { height: 46px; padding: .68rem .72rem; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; font-size: .79rem; }
@@ -187,6 +191,7 @@ tbody tr.clickable:hover { background: var(--surface-soft); cursor: pointer; }
   line-clamp: 2;
   line-height: 1.38;
 }
+.table-empty { height: 374px; color: var(--muted); text-align: center; vertical-align: middle; }
 .loading-list { display: grid; gap: .52rem; padding: .25rem 0; }
 .loading-row { height: 42px; border-radius: var(--radius-sm); background: linear-gradient(90deg, var(--surface-soft) 20%, color-mix(in srgb, var(--surface-soft) 50%, var(--border)) 48%, var(--surface-soft) 76%); background-size: 220% 100%; animation: shimmer 1.35s ease infinite; }
 @keyframes shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }

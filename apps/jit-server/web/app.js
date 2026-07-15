@@ -1,6 +1,6 @@
 "use strict";
 
-const state = { csrf: null, expiresAt: null, pollTimer: null, toolsController: null, searchTimer: null };
+const state = { csrf: null, expiresAt: null, pollTimer: null, toolsController: null };
 const $ = (selector) => document.querySelector(selector);
 
 function element(tag, options = {}, children = []) {
@@ -116,7 +116,6 @@ async function route() {
   if (!state.csrf) return;
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
   if (state.toolsController) state.toolsController.abort();
-  if (state.searchTimer) window.clearTimeout(state.searchTimer);
   const view = $("#view");
   clear(view);
   const hash = location.hash || "#/tools";
@@ -143,7 +142,7 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
     element("button", { className: "primary compact-button", text: "搜索", type: "submit" })
   ]);
   const resultMeta = element("span", { className: "panel-meta", text: "加载中" });
-  const results = element("div", { className: "results-region" }, loadingRows());
+  const results = element("div", { className: "results-region tool-results" }, loadingRows());
   const toolPanel = panel("能力列表", [form, results], resultMeta);
   const jobsRegion = element("div", { className: "results-region" }, loadingRows(3));
   view.append(toolPanel, panel("最近合成任务", jobsRegion));
@@ -174,11 +173,6 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
   };
 
   form.addEventListener("submit", (event) => { event.preventDefault(); load(0); });
-  searchInput.addEventListener("input", () => {
-    if (state.searchTimer) window.clearTimeout(state.searchTimer);
-    state.searchTimer = window.setTimeout(() => load(0), 280);
-  });
-  include.addEventListener("change", () => load(0));
   load(offset);
   try {
     const jobs = await api("/v1/jobs?limit=8&offset=0");
@@ -189,7 +183,6 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
 }
 
 function renderToolsResult(tools, offset, previousPage, nextPage) {
-  if (!tools.tools.length) return element("div", { className: "empty", text: "没有匹配的工具" });
   const table = element("table");
   table.append(tableHead(["工具", "状态", "稳定版本", "最新版本", "格式", "能力描述"]));
   const body = element("tbody");
@@ -204,6 +197,13 @@ function renderToolsResult(tools, offset, previousPage, nextPage) {
       element("td", { className: "description-column" }, element("div", { className: "description-cell", text: tool.description }))
     );
     row.addEventListener("click", () => { location.hash = `#/tools/${encodeURIComponent(tool.tool)}`; });
+    body.append(row);
+  }
+  if (!tools.tools.length) {
+    const row = element("tr");
+    const cell = element("td", { className: "table-empty", text: "没有匹配的工具" });
+    cell.colSpan = 6;
+    row.append(cell);
     body.append(row);
   }
   table.append(body);
