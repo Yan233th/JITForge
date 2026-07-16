@@ -1,9 +1,12 @@
 use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use chrono::Utc;
-use jit_artifact::{ArtifactStore, StoredArtifact, ToolContract, ToolTestCase, ValidationSummary};
+use jit_artifact::{
+    ArtifactStore, NewArtifact, StoredArtifact, ToolContract, ToolTestCase, ValidationSummary,
+};
 use jit_protocol::{
-    HttpCapability, HttpMethod, IoFormat, JobInputAnswer, JobInputChoice, JobInputKind, JobStage,
+    HttpCapability, HttpCapabilityGrant, HttpFixture, HttpMethod, IoFormat, JobInputAnswer,
+    JobInputChoice, JobInputKind, JobStage,
 };
 use jit_storage::{ClaimedSynthesisJob, NewJobInput, PublishedArtifact, Registry, StorageError};
 use rig_core::{
@@ -317,7 +320,12 @@ impl JobProcessor {
             "submit_contract" => {
                 let args: SubmitContractArgs = parse_args(arguments)?;
                 validate_reason(&args.reason)?;
-                let draft = validate_contract(args, job)?;
+                let draft = validate_contract(
+                    args,
+                    job,
+                    &workspace.http_capabilities,
+                    &workspace.http_probe_records,
+                )?;
                 let review_request = ContractReviewRequest {
                     name: job.tool.clone(),
                     intent: job.intent.clone(),
@@ -747,7 +755,7 @@ impl JobProcessor {
                     final_url: response.url,
                     status: response.status,
                     content_type: response.content_type,
-                    body: truncate_text_to_bytes(&body, 128 * 1024),
+                    body: truncate_text_to_bytes(&body, 16 * 1024),
                 };
                 workspace.http_probe_records.push(record.clone());
                 Ok(ToolExecution::Continue(json!({
@@ -775,7 +783,13 @@ impl JobProcessor {
         self.registry
             .set_job_stage(job.job_id, &self.worker_id, JobStage::Building)
             .await?;
-        let artifact = self.store_candidate(job, draft, source, workspace.metrics)?;
+        let artifact = self.store_candidate(
+            job,
+            draft,
+            source,
+            workspace.metrics,
+            &workspace.http_capabilities,
+        )?;
         workspace.candidate_digests.insert(artifact.digest.clone());
         workspace
             .candidate_sources
@@ -785,11 +799,13 @@ impl JobProcessor {
         self.registry
             .set_job_stage(job.job_id, &self.worker_id, JobStage::Validating)
             .await?;
+        let sample_fixtures = probe_records_to_fixtures(&workspace.http_probe_records);
         let validation = match validate_input_samples(
             &self.runner,
             &artifact.digest,
             job.output_format,
             &job.input_samples,
+            &sample_fixtures,
         )
         .await
         {
@@ -829,15 +845,16 @@ impl JobProcessor {
         draft: &SynthesisDraft,
         source: &str,
         metrics: AgentMetrics,
+        http_capabilities: &[ApprovedHttpCapability],
     ) -> Result<StoredArtifact, JobError> {
         let tests_total = draft.tests.len();
-        Ok(self.store.put(
-            job.input_format,
-            job.output_format,
-            draft.contract.clone(),
-            source.to_owned(),
-            draft.tests.clone(),
-            ValidationSummary {
+        Ok(self.store.put(NewArtifact {
+            input_format: job.input_format,
+            output_format: job.output_format,
+            contract: draft.contract.clone(),
+            source: source.to_owned(),
+            tests: draft.tests.clone(),
+            validation: ValidationSummary {
                 tests_total,
                 tests_passed: tests_total,
                 input_samples_total: job.input_samples.len(),
@@ -848,7 +865,14 @@ impl JobProcessor {
                 probes_run: metrics.probes_run,
                 validated_at: Utc::now().to_rfc3339(),
             },
-        )?)
+            http_capabilities: http_capabilities
+                .iter()
+                .map(|approved| HttpCapabilityGrant {
+                    approval_hash: approved.hash.clone(),
+                    capability: approved.capability.clone(),
+                })
+                .collect(),
+        })?)
     }
 
     async fn publish(
@@ -1188,9 +1212,25 @@ fn submit_contract_tool() -> ToolDefinition {
                             "args": {"type": "array", "items": {"type": "string"}},
                             "stdin": {"type": "string"},
                             "expected_stdout": {"type": "string"},
-                            "expected_exit_code": {"type": "integer"}
+                            "expected_exit_code": {"type": "integer"},
+                            "http_fixtures": {
+                                "type": "array",
+                                "maxItems": 8,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "request_url": {"type": "string"},
+                                        "response_url": {"type": "string"},
+                                        "status": {"type": "integer"},
+                                        "content_type": {"type": "string"},
+                                        "body": {"type": "string"}
+                                    },
+                                    "required": ["request_url", "response_url", "status", "content_type", "body"],
+                                    "additionalProperties": false
+                                }
+                            }
                         },
-                        "required": ["name", "args", "stdin", "expected_stdout", "expected_exit_code"],
+                        "required": ["name", "args", "stdin", "expected_stdout", "expected_exit_code", "http_fixtures"],
                         "additionalProperties": false
                     }
                 },
@@ -1503,6 +1543,8 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
 fn validate_contract(
     mut args: SubmitContractArgs,
     job: &ClaimedSynthesisJob,
+    http_capabilities: &[ApprovedHttpCapability],
+    http_probe_records: &[HttpProbeRecord],
 ) -> Result<SynthesisDraft, JobError> {
     if args.summary.trim().is_empty() || args.summary.len() > 4096 {
         return Err(invalid_action("contract summary must contain 1-4096 bytes"));
@@ -1520,6 +1562,7 @@ fn validate_contract(
         ));
     }
     args.tests.truncate(12);
+    let recorded_fixtures = probe_records_to_fixtures(http_probe_records);
     let mut tests: Vec<ToolTestCase> = job
         .examples
         .iter()
@@ -1530,6 +1573,7 @@ fn validate_contract(
             stdin: example.input.clone(),
             expected_stdout: example.output.clone(),
             expected_exit_code: 0,
+            http_fixtures: recorded_fixtures.clone(),
         })
         .collect();
     let user_test_count = tests.len();
@@ -1540,11 +1584,13 @@ fn validate_contract(
             index + 1,
             if name.is_empty() { "test" } else { &name }
         );
-        validate_test(&test, job.output_format)?;
         tests.push(test);
     }
     if tests.is_empty() {
         return Err(invalid_action("contract must contain at least one test"));
+    }
+    for test in &tests {
+        validate_test(test, job.output_format, http_capabilities)?;
     }
     Ok(SynthesisDraft {
         contract: ToolContract {
@@ -1557,7 +1603,11 @@ fn validate_contract(
     })
 }
 
-fn validate_test(test: &ToolTestCase, output_format: IoFormat) -> Result<(), JobError> {
+fn validate_test(
+    test: &ToolTestCase,
+    output_format: IoFormat,
+    http_capabilities: &[ApprovedHttpCapability],
+) -> Result<(), JobError> {
     if test.name.is_empty()
         || test.name.len() > 128
         || test.stdin.len() > 1024 * 1024
@@ -1571,7 +1621,49 @@ fn validate_test(test: &ToolTestCase, output_format: IoFormat) -> Result<(), Job
         serde_json::from_str::<Value>(&test.expected_stdout)
             .map_err(|error| invalid_action(format!("generated test has invalid JSON: {error}")))?;
     }
+    validate_http_fixtures(&test.http_fixtures, http_capabilities)?;
     Ok(())
+}
+
+fn validate_http_fixtures(
+    fixtures: &[HttpFixture],
+    http_capabilities: &[ApprovedHttpCapability],
+) -> Result<(), JobError> {
+    if fixtures.len() > 8
+        || serde_json::to_vec(fixtures)?.len() > 96 * 1024
+        || fixtures.iter().any(|fixture| {
+            fixture.request_url.len() > 4096
+                || fixture.response_url.len() > 4096
+                || !(100..=599).contains(&fixture.status)
+                || fixture.content_type.is_empty()
+                || fixture.content_type.len() > 256
+                || fixture.body.len() > 64 * 1024
+        })
+    {
+        return Err(invalid_action("HTTP test fixtures exceed protocol limits"));
+    }
+    let mut requests = HashSet::new();
+    for fixture in fixtures {
+        if !requests.insert(&fixture.request_url) {
+            return Err(invalid_action("HTTP test fixture requests must be unique"));
+        }
+        approved_capability_for_url(http_capabilities, &fixture.request_url)?;
+        approved_capability_for_url(http_capabilities, &fixture.response_url)?;
+    }
+    Ok(())
+}
+
+fn probe_records_to_fixtures(records: &[HttpProbeRecord]) -> Vec<HttpFixture> {
+    records
+        .iter()
+        .map(|record| HttpFixture {
+            request_url: record.request_url.clone(),
+            response_url: record.final_url.clone(),
+            status: record.status,
+            content_type: record.content_type.clone(),
+            body: record.body.clone(),
+        })
+        .collect()
 }
 
 fn validate_probe(args: &ProbeArgs) -> Result<(), JobError> {
@@ -1636,11 +1728,12 @@ async fn validate_tests(
             TestOrigin::Generated
         };
         let output = match runner
-            .execute(
+            .execute_with_fixtures(
                 digest,
                 &test.args,
                 test.stdin.as_bytes(),
                 Duration::from_secs(5),
+                &test.http_fixtures,
             )
             .await
         {
@@ -1690,11 +1783,18 @@ async fn validate_input_samples(
     digest: &str,
     output_format: IoFormat,
     samples: &[String],
+    fixtures: &[HttpFixture],
 ) -> Result<(), ValidationFailureSnapshot> {
     for (index, sample) in samples.iter().enumerate() {
         let name = format!("input-sample-{}", index + 1);
         let output = match runner
-            .execute(digest, &[], sample.as_bytes(), Duration::from_secs(5))
+            .execute_with_fixtures(
+                digest,
+                &[],
+                sample.as_bytes(),
+                Duration::from_secs(5),
+                fixtures,
+            )
             .await
         {
             Ok(output) => output,
@@ -1952,6 +2052,7 @@ mod tests {
             stdin: "{}".to_owned(),
             expected_stdout: "{}".to_owned(),
             expected_exit_code: 0,
+            http_fixtures: vec![],
         };
         assert!(validate_stdout(IoFormat::Json, &test, b"", b"").is_err());
         assert!(validate_stdout(IoFormat::Json, &test, b"{}", b"").is_ok());
@@ -1984,6 +2085,8 @@ mod tests {
                 reason: "test".to_owned(),
             },
             &job,
+            &[],
+            &[],
         )
         .unwrap();
         assert_eq!(draft.user_test_count, 1);
@@ -2023,6 +2126,8 @@ mod tests {
                 reason: "first attempt".to_owned(),
             },
             &job,
+            &[],
+            &[],
         );
         assert!(invalid.is_err());
 
@@ -2037,10 +2142,13 @@ mod tests {
                     stdin: "a".to_owned(),
                     expected_stdout: "b".to_owned(),
                     expected_exit_code: 0,
+                    http_fixtures: vec![],
                 }],
                 reason: "add a concrete test".to_owned(),
             },
             &job,
+            &[],
+            &[],
         )
         .unwrap();
         assert_eq!(corrected.tests.len(), 1);

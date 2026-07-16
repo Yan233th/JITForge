@@ -1,6 +1,8 @@
 use std::{collections::HashSet, io, process::Stdio, time::Duration};
 
 use jit_artifact::{ArtifactError, ArtifactStore, source_image_tag};
+use jit_protocol::HttpFixture;
+use jit_storage::Registry;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
@@ -13,7 +15,6 @@ const MAX_STREAM_BYTES: usize = 1024 * 1024;
 const MAX_BUILD_TIME: Duration = Duration::from_secs(60);
 const SANDBOX_RUN_OPTIONS: &[&str] = &[
     "--rm",
-    "--network=none",
     "--user=65532:65532",
     "--read-only",
     "--cap-drop=ALL",
@@ -33,6 +34,14 @@ pub struct DockerRunner {
     store: ArtifactStore,
     runtime: String,
     docker_binary: String,
+    http_mode: HttpMode,
+    registry: Registry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HttpMode {
+    Disabled,
+    Direct,
 }
 
 #[derive(Clone, Debug)]
@@ -44,12 +53,24 @@ pub struct ExecutionOutput {
 }
 
 impl DockerRunner {
-    pub fn new(store: ArtifactStore, runtime: impl Into<String>) -> Self {
-        Self {
+    pub fn new(
+        store: ArtifactStore,
+        registry: Registry,
+        runtime: impl Into<String>,
+        http_mode: &str,
+    ) -> Result<Self, RunnerError> {
+        let http_mode = match http_mode.trim() {
+            "disabled" => HttpMode::Disabled,
+            "direct" => HttpMode::Direct,
+            other => return Err(RunnerError::InvalidHttpMode(other.to_owned())),
+        };
+        Ok(Self {
             store,
+            registry,
             runtime: runtime.into(),
             docker_binary: "docker".to_owned(),
-        }
+            http_mode,
+        })
     }
 
     pub async fn ensure_ready(&self) -> Result<(), RunnerError> {
@@ -72,7 +93,7 @@ impl DockerRunner {
     pub async fn build_artifact(&self, digest: &str) -> Result<String, RunnerError> {
         let stored = self.store.load(digest)?;
         let source_sha256 = &stored.bundle.manifest.source_sha256;
-        let tag = source_image_tag(source_sha256)?;
+        let tag = source_image_tag(&stored.bundle.manifest.runtime, source_sha256)?;
         let present = Command::new(&self.docker_binary)
             .args([
                 "image",
@@ -119,15 +140,17 @@ impl DockerRunner {
     }
 
     pub async fn remove_source_image(&self, source_sha256: &str) -> Result<(), RunnerError> {
-        let tag = source_image_tag(source_sha256)?;
-        let output = Command::new(&self.docker_binary)
-            .args(["image", "rm", "--force", &tag])
-            .output()
-            .await?;
-        if !output.status.success()
-            && !String::from_utf8_lossy(&output.stderr).contains("No such image")
-        {
-            return Err(RunnerError::Docker(truncate_diagnostic(&output.stderr)));
+        for runtime in ["python-stdlib-v1", "python-stdlib-v2"] {
+            let tag = source_image_tag(runtime, source_sha256)?;
+            let output = Command::new(&self.docker_binary)
+                .args(["image", "rm", "--force", &tag])
+                .output()
+                .await?;
+            if !output.status.success()
+                && !String::from_utf8_lossy(&output.stderr).contains("No such image")
+            {
+                return Err(RunnerError::Docker(truncate_diagnostic(&output.stderr)));
+            }
         }
         Ok(())
     }
@@ -189,6 +212,70 @@ impl DockerRunner {
         stdin: &[u8],
         time_limit: Duration,
     ) -> Result<ExecutionOutput, RunnerError> {
+        self.execute_inner(digest, args, stdin, time_limit, None)
+            .await
+    }
+
+    pub async fn execute_with_fixtures(
+        &self,
+        digest: &str,
+        args: &[String],
+        stdin: &[u8],
+        time_limit: Duration,
+        fixtures: &[HttpFixture],
+    ) -> Result<ExecutionOutput, RunnerError> {
+        self.execute_inner(digest, args, stdin, time_limit, Some(fixtures))
+            .await
+    }
+
+    async fn execute_inner(
+        &self,
+        digest: &str,
+        args: &[String],
+        stdin: &[u8],
+        time_limit: Duration,
+        fixtures: Option<&[HttpFixture]>,
+    ) -> Result<ExecutionOutput, RunnerError> {
+        let stored = self.store.load(digest)?;
+        let has_http = !stored.bundle.manifest.http_capabilities.is_empty();
+        if has_http {
+            let hashes = stored
+                .bundle
+                .manifest
+                .http_capabilities
+                .iter()
+                .map(|grant| grant.approval_hash.clone())
+                .collect::<Vec<_>>();
+            if !self
+                .registry
+                .all_http_capabilities_approved(&hashes)
+                .await?
+            {
+                return Err(RunnerError::HttpApprovalRevoked);
+            }
+        }
+        let fixture_json = fixtures
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| RunnerError::HttpFixture(error.to_string()))?;
+        if fixture_json
+            .as_ref()
+            .is_some_and(|encoded| encoded.len() > 96 * 1024)
+        {
+            return Err(RunnerError::HttpFixture(
+                "encoded HTTP fixtures exceed 96 KiB".to_owned(),
+            ));
+        }
+        let network = if fixtures.is_some() {
+            "none"
+        } else if has_http {
+            match self.http_mode {
+                HttpMode::Direct => "bridge",
+                HttpMode::Disabled => return Err(RunnerError::HttpDisabled),
+            }
+        } else {
+            "none"
+        };
         let image = self.build_artifact(digest).await?;
         let container_name = format!("jitforge-{}", Uuid::now_v7().simple());
         let started_at = Instant::now();
@@ -199,7 +286,23 @@ impl DockerRunner {
             .arg(&container_name)
             .arg("--runtime")
             .arg(&self.runtime)
+            .arg("--network")
+            .arg(network)
             .args(SANDBOX_RUN_OPTIONS)
+            .arg("--env")
+            .arg(if fixtures.is_some() {
+                "JITFORGE_HTTP_MODE=fixture"
+            } else if has_http {
+                "JITFORGE_HTTP_MODE=direct"
+            } else {
+                "JITFORGE_HTTP_MODE=disabled"
+            });
+        if let Some(fixtures) = fixture_json {
+            command
+                .arg("--env")
+                .arg(format!("JITFORGE_HTTP_FIXTURES={fixtures}"));
+        }
+        command
             .arg(&image)
             .args(args)
             .stdin(Stdio::piped())
@@ -328,6 +431,18 @@ pub enum RunnerError {
     #[error("Docker runtime {0:?} is unavailable")]
     RuntimeUnavailable(String),
 
+    #[error("unsupported runner HTTP mode {0:?}")]
+    InvalidHttpMode(String),
+
+    #[error("artifact requires live HTTP, but runner HTTP mode is disabled")]
+    HttpDisabled,
+
+    #[error("artifact HTTP capability approval is missing or revoked")]
+    HttpApprovalRevoked,
+
+    #[error("invalid HTTP fixture configuration: {0}")]
+    HttpFixture(String),
+
     #[error("Docker operation failed: {0}")]
     Docker(String),
 
@@ -354,6 +469,9 @@ pub enum RunnerError {
 
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
+
+    #[error(transparent)]
+    Storage(#[from] jit_storage::StorageError),
 
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -384,7 +502,6 @@ mod tests {
     #[test]
     fn sandbox_options_pin_process_and_identity_limits() {
         for required in [
-            "--network=none",
             "--user=65532:65532",
             "--ulimit=nproc=16:16",
             "--memory-swap=128m",
@@ -392,5 +509,6 @@ mod tests {
         ] {
             assert!(SANDBOX_RUN_OPTIONS.contains(&required));
         }
+        assert!(!SANDBOX_RUN_OPTIONS.contains(&"--network=bridge"));
     }
 }

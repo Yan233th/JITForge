@@ -22,11 +22,18 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  runtime-image:
+  runtime-image-v1:
     image: jitforge/python-stdlib-v1:0.1.0
     build:
       context: ./runtimes/python-stdlib-v1
     command: ["python3", "-c", "print('jitforge runtime ready')"]
+
+  runtime-image:
+    image: jitforge/python-stdlib-v2:0.1.0
+    build:
+      context: ./runtimes/python-stdlib-v2
+    entrypoint: ["python3", "-c"]
+    command: ["print('jitforge runtime v2 ready')"]
 
   worker:
     profiles: ["containerized"]
@@ -53,6 +60,8 @@ services:
       JITFORGE_LLM_THINKING: ${JITFORGE_LLM_THINKING-}
       JITFORGE_SEARCH_PROVIDER: ${JITFORGE_SEARCH_PROVIDER-searxng}
       JITFORGE_SEARCH_BASE_URL: ${JITFORGE_SEARCH_BASE_URL-http://searxng:8080/}
+      JITFORGE_SEARCH_ENGINES: ${JITFORGE_SEARCH_ENGINES-mojeek}
+      JITFORGE_HTTP_MODE: ${JITFORGE_HTTP_MODE-disabled}
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,6 +108,23 @@ services:
         source: ${JITFORGE_SERVER_CONFIG_FILE:-/dev/null}
         target: /etc/jitforge/config.toml
         read_only: true
+
+  nginx:
+    profiles: ["containerized"]
+    image: nginx:stable-alpine
+    depends_on:
+      server:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${JITFORGE_GATEWAY_PORT:-8090}:8080"
+    volumes:
+      - ./deployments/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/nginx-healthz >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
 
 volumes:
   postgres-data:

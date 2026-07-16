@@ -3,11 +3,11 @@ use std::{collections::HashSet, str::FromStr, time::Duration};
 use chrono::{DateTime, Utc};
 use jit_domain::{ToolName, ToolVersionStatus};
 use jit_protocol::{
-    HttpCapability, IoFormat, JobAnswerRequest, JobError, JobInputAnswer, JobInputChoice,
-    JobInputKind, JobListResponse, JobResponse, JobStage, JobStatus, PendingJobInput,
-    RegistrationRequest, RegistrationResponse, RevokeResponse, ToolExample, ToolListItem,
-    ToolListResponse, ToolSummaryResponse, ToolVersionListItem, ToolVersionListResponse,
-    ToolVersionSummary,
+    HttpCapability, HttpCapabilityApproval, HttpCapabilityApprovalList, IoFormat, JobAnswerRequest,
+    JobError, JobInputAnswer, JobInputChoice, JobInputKind, JobListResponse, JobResponse, JobStage,
+    JobStatus, PendingJobInput, RegistrationRequest, RegistrationResponse, RevokeResponse,
+    ToolExample, ToolListItem, ToolListResponse, ToolSummaryResponse, ToolVersionListItem,
+    ToolVersionListResponse, ToolVersionSummary,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -602,6 +602,75 @@ impl Registry {
         .bind(job_id)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn all_http_capabilities_approved(
+        &self,
+        capability_hashes: &[String],
+    ) -> Result<bool, StorageError> {
+        if capability_hashes.is_empty() {
+            return Ok(true);
+        }
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM http_capability_approvals
+             WHERE capability_hash = ANY($1) AND status = 'active'",
+        )
+        .bind(capability_hashes)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(active == i64::try_from(capability_hashes.len()).unwrap_or(i64::MAX))
+    }
+
+    pub async fn list_http_capability_approvals(
+        &self,
+    ) -> Result<HttpCapabilityApprovalList, StorageError> {
+        let rows = sqlx::query(
+            "SELECT capability_hash, capability, status, approved_at, revoked_at, revoked_reason
+             FROM http_capability_approvals
+             ORDER BY approved_at DESC, capability_hash",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let approvals = rows
+            .into_iter()
+            .map(|row| {
+                let capability: Value = row.try_get("capability")?;
+                let approved_at: DateTime<Utc> = row.try_get("approved_at")?;
+                let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at")?;
+                Ok(HttpCapabilityApproval {
+                    capability_hash: row.try_get("capability_hash")?,
+                    capability: serde_json::from_value(capability)?,
+                    status: row.try_get("status")?,
+                    approved_at: approved_at.to_rfc3339(),
+                    revoked_at: revoked_at.map(|value| value.to_rfc3339()),
+                    revoked_reason: row.try_get("revoked_reason")?,
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        Ok(HttpCapabilityApprovalList { approvals })
+    }
+
+    pub async fn revoke_http_capability(
+        &self,
+        capability_hash: &str,
+        reason: &str,
+    ) -> Result<(), StorageError> {
+        if reason.trim().is_empty() || reason.len() > 4096 {
+            return Err(StorageError::InvalidRevocationReason);
+        }
+        let result = sqlx::query(
+            "UPDATE http_capability_approvals
+             SET status = 'revoked', revoked_at = now(), revoked_reason = $2
+             WHERE capability_hash = $1 AND status = 'active'",
+        )
+        .bind(capability_hash)
+        .bind(reason.trim())
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::HttpCapabilityNotFound);
+        }
         Ok(())
     }
 
@@ -1576,6 +1645,12 @@ pub enum StorageError {
 
     #[error("answer does not match the pending synthesis job input")]
     InvalidJobInputAnswer,
+
+    #[error("HTTP capability approval was not found or is already revoked")]
+    HttpCapabilityNotFound,
+
+    #[error("revocation reason must contain 1-4096 bytes")]
+    InvalidRevocationReason,
 
     #[error("idempotency key was already used for a different request")]
     IdempotencyConflict,

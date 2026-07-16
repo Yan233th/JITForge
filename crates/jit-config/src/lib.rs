@@ -17,6 +17,7 @@ pub struct JitForgeConfig {
     pub worker: WorkerConfig,
     pub llm: LlmConfig,
     pub search: SearchConfig,
+    pub http: HttpConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -68,6 +69,13 @@ pub struct LlmConfig {
 pub struct SearchConfig {
     pub provider: Option<String>,
     pub base_url: Option<String>,
+    pub engines: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HttpConfig {
+    pub mode: Option<String>,
 }
 
 impl JitForgeConfig {
@@ -197,6 +205,10 @@ mod tests {
             [search]
             provider = "searxng"
             base_url = "http://127.0.0.1:8888"
+            engines = "mojeek"
+
+            [http]
+            mode = "direct"
             "#,
         )
         .unwrap();
@@ -208,6 +220,7 @@ mod tests {
         assert_eq!(config.llm.model.as_deref(), Some("coder"));
         assert_eq!(config.llm.protocol.as_deref(), Some("chat_completions"));
         assert_eq!(config.search.provider.as_deref(), Some("searxng"));
+        assert_eq!(config.http.mode.as_deref(), Some("direct"));
         assert_eq!(
             config.server.artifact_dir.as_deref(),
             Some(".data/artifacts")

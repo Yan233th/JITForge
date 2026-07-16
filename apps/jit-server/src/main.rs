@@ -149,6 +149,11 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/tools/{name}/invocations", post(invoke_tool))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{job_id}", get(get_job).post(answer_job_input))
+        .route("/v1/http-capabilities", get(list_http_capability_approvals))
+        .route(
+            "/v1/http-capabilities/{capability_hash}/revoke",
+            post(revoke_http_capability),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let request_id_header = HeaderName::from_static("x-request-id");
@@ -317,6 +322,30 @@ async fn answer_job_input(
     Ok(Json(response))
 }
 
+async fn list_http_capability_approvals(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, ApiError> {
+    let response = state
+        .registry
+        .list_http_capability_approvals()
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(Json(response))
+}
+
+async fn revoke_http_capability(
+    State(state): State<AppState>,
+    Path(capability_hash): Path<String>,
+    Json(request): Json<RevokeRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    state
+        .registry
+        .revoke_http_capability(&capability_hash, &request.reason)
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ListJobsQuery {
     status: Option<String>,
@@ -457,6 +486,7 @@ async fn get_tool_artifact(
             input_format: bundle.manifest.input_format,
             output_format: bundle.manifest.output_format,
             source_sha256: bundle.manifest.source_sha256,
+            http_capabilities: bundle.manifest.http_capabilities,
         },
         source: bundle.source,
         tests: bundle
@@ -723,6 +753,16 @@ impl ApiError {
                 StatusCode::BAD_REQUEST,
                 "invalid_job_answer",
                 "the answer does not match the pending input",
+            ),
+            StorageError::HttpCapabilityNotFound => Self::new(
+                StatusCode::CONFLICT,
+                "http_capability_not_active",
+                "HTTP capability approval was not found or is already revoked",
+            ),
+            StorageError::InvalidRevocationReason => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_revocation_reason",
+                error.to_string(),
             ),
             StorageError::IdempotencyConflict => Self::new(
                 StatusCode::CONFLICT,

@@ -3,18 +3,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use jit_protocol::IoFormat;
+use jit_protocol::{HttpCapabilityGrant, HttpFixture, IoFormat};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-pub const RUNTIME_IMAGE: &str = "jitforge/python-stdlib-v1:0.1.0";
+pub const RUNTIME_IMAGE: &str = "jitforge/python-stdlib-v2:0.1.0";
 
-const ARTIFACT_DOCKERFILE: &str = r#"FROM jitforge/python-stdlib-v1:0.1.0
+const ARTIFACT_DOCKERFILE: &str = r#"FROM jitforge/python-stdlib-v2:0.1.0
 COPY --chown=65532:65532 tool.py /opt/jitforge/tool.py
+COPY --chown=65532:65532 manifest.json /opt/jitforge/manifest.json
 USER 65532:65532
-ENTRYPOINT ["python3", "-I", "-S", "-B", "/opt/jitforge/tool.py"]
 "#;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -35,6 +35,8 @@ pub struct ToolTestCase {
     pub expected_stdout: String,
     #[serde(default)]
     pub expected_exit_code: i32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_fixtures: Vec<HttpFixture>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -62,6 +64,8 @@ pub struct ArtifactManifest {
     pub input_format: IoFormat,
     pub output_format: IoFormat,
     pub source_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_capabilities: Vec<HttpCapabilityGrant>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -71,6 +75,16 @@ pub struct ArtifactBundle {
     pub source: String,
     pub tests: Vec<ToolTestCase>,
     pub validation: ValidationSummary,
+}
+
+pub struct NewArtifact {
+    pub input_format: IoFormat,
+    pub output_format: IoFormat,
+    pub contract: ToolContract,
+    pub source: String,
+    pub tests: Vec<ToolTestCase>,
+    pub validation: ValidationSummary,
+    pub http_capabilities: Vec<HttpCapabilityGrant>,
 }
 
 #[derive(Serialize)]
@@ -115,24 +129,26 @@ impl ArtifactStore {
         &self.root
     }
 
-    pub fn put(
-        &self,
-        input_format: IoFormat,
-        output_format: IoFormat,
-        contract: ToolContract,
-        source: String,
-        tests: Vec<ToolTestCase>,
-        validation: ValidationSummary,
-    ) -> Result<StoredArtifact, ArtifactError> {
+    pub fn put(&self, artifact: NewArtifact) -> Result<StoredArtifact, ArtifactError> {
+        let NewArtifact {
+            input_format,
+            output_format,
+            contract,
+            source,
+            tests,
+            validation,
+            http_capabilities,
+        } = artifact;
         validate_source(&source)?;
         let source_sha256 = hex::encode(Sha256::digest(source.as_bytes()));
         let bundle = ArtifactBundle {
             manifest: ArtifactManifest {
-                format_version: 2,
-                runtime: "python-stdlib-v1".to_owned(),
+                format_version: 3,
+                runtime: "python-stdlib-v2".to_owned(),
                 input_format,
                 output_format,
                 source_sha256,
+                http_capabilities,
             },
             contract,
             source,
@@ -203,7 +219,7 @@ impl ArtifactStore {
         let bundle: ArtifactBundle = serde_json::from_slice(&encoded)?;
         let actual = match bundle.manifest.format_version {
             1 => hex::encode(Sha256::digest(&encoded)),
-            2 => semantic_digest(&bundle)?,
+            2 | 3 => semantic_digest(&bundle)?,
             version => return Err(ArtifactError::UnsupportedFormat(version)),
         };
         if actual != hex_digest {
@@ -288,14 +304,16 @@ impl ArtifactStore {
     }
 }
 
-pub fn source_image_tag(source_sha256: &str) -> Result<String, ArtifactError> {
+pub fn source_image_tag(runtime: &str, source_sha256: &str) -> Result<String, ArtifactError> {
     if source_sha256.len() != 64 || !source_sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ArtifactError::InvalidSourceDigest(source_sha256.to_owned()));
     }
-    Ok(format!(
-        "jitforge-source:{}",
-        source_sha256.to_ascii_lowercase()
-    ))
+    let source_sha256 = source_sha256.to_ascii_lowercase();
+    if runtime == "python-stdlib-v1" {
+        return Ok(format!("jitforge-source:{source_sha256}"));
+    }
+    let image_key = hex::encode(Sha256::digest(format!("{runtime}\0{source_sha256}")));
+    Ok(format!("jitforge-source:{image_key}"))
 }
 
 fn validate_hex_digest(digest: &str) -> Result<&str, ArtifactError> {
@@ -384,18 +402,19 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let store = ArtifactStore::new(temporary.path());
         let first = store
-            .put(
-                IoFormat::Text,
-                IoFormat::Text,
-                ToolContract {
+            .put(NewArtifact {
+                input_format: IoFormat::Text,
+                output_format: IoFormat::Text,
+                contract: ToolContract {
                     summary: "echo".to_owned(),
                     assumptions: vec![],
                     invariants: vec![],
                 },
-                "import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())\n".to_owned(),
-                vec![],
-                example_summary(),
-            )
+                source: "import sys\nsys.stdout.buffer.write(sys.stdin.buffer.read())\n".to_owned(),
+                tests: vec![],
+                validation: example_summary(),
+                http_capabilities: vec![],
+            })
             .unwrap();
         let second = store.load(&first.digest).unwrap();
         assert_eq!(first.digest, second.digest);
@@ -407,10 +426,10 @@ mod tests {
     fn image_tags_are_derived_from_verified_digests() {
         let digest = "a".repeat(64);
         assert_eq!(
-            source_image_tag(&digest).unwrap(),
+            source_image_tag("python-stdlib-v1", &digest).unwrap(),
             format!("jitforge-source:{}", "a".repeat(64))
         );
-        assert!(source_image_tag("latest").is_err());
+        assert!(source_image_tag("python-stdlib-v2", "latest").is_err());
     }
 
     #[test]
@@ -419,21 +438,22 @@ mod tests {
         let second_root = tempfile::tempdir().unwrap();
         let put = |root: &Path, validated_at: &str| {
             ArtifactStore::new(root)
-                .put(
-                    IoFormat::Text,
-                    IoFormat::Text,
-                    ToolContract {
+                .put(NewArtifact {
+                    input_format: IoFormat::Text,
+                    output_format: IoFormat::Text,
+                    contract: ToolContract {
                         summary: "echo".to_owned(),
                         assumptions: vec![],
                         invariants: vec![],
                     },
-                    "print('ok')\n".to_owned(),
-                    vec![],
-                    ValidationSummary {
+                    source: "print('ok')\n".to_owned(),
+                    tests: vec![],
+                    validation: ValidationSummary {
                         validated_at: validated_at.to_owned(),
                         ..example_summary()
                     },
-                )
+                    http_capabilities: vec![],
+                })
                 .unwrap()
         };
         assert_eq!(
@@ -452,6 +472,7 @@ mod tests {
                 input_format: IoFormat::Text,
                 output_format: IoFormat::Text,
                 source_sha256: hex::encode(Sha256::digest(b"print('v1')\n")),
+                http_capabilities: vec![],
             },
             contract: ToolContract {
                 summary: "legacy".to_owned(),

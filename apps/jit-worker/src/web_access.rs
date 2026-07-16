@@ -15,6 +15,7 @@ const MAX_REDIRECTS: usize = 3;
 pub struct WebAccess {
     search_base_url: Url,
     search_client: reqwest::Client,
+    search_engines: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -55,7 +56,7 @@ struct SearxResult {
 }
 
 impl WebAccess {
-    pub fn new(provider: &str, base_url: &str) -> Result<Self, WebAccessError> {
+    pub fn new(provider: &str, base_url: &str, engines: &str) -> Result<Self, WebAccessError> {
         if provider != "searxng" {
             return Err(WebAccessError::InvalidConfig(format!(
                 "unsupported search provider {provider:?}; expected searxng"
@@ -81,6 +82,7 @@ impl WebAccess {
         Ok(Self {
             search_base_url,
             search_client,
+            search_engines: engines.trim().to_owned(),
         })
     }
 
@@ -99,6 +101,10 @@ impl WebAccess {
             .append_pair("format", "json")
             .append_pair("categories", "general")
             .append_pair("safesearch", "1");
+        if !self.search_engines.is_empty() {
+            url.query_pairs_mut()
+                .append_pair("engines", &self.search_engines);
+        }
         let response = self.search_client.get(url).send().await?;
         if !response.status().is_success() {
             return Err(WebAccessError::Upstream(format!(

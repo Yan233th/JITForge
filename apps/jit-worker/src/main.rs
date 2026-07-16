@@ -36,6 +36,7 @@ struct Config {
     synthesizer_mode: String,
     llm: LlmSettings,
     search: SearchSettings,
+    http_mode: String,
 }
 
 #[derive(Debug)]
@@ -52,6 +53,7 @@ struct LlmSettings {
 struct SearchSettings {
     provider: String,
     base_url: String,
+    engines: String,
 }
 
 #[tokio::main]
@@ -64,13 +66,22 @@ async fn main() -> Result<()> {
     registry.migrate().await?;
     let artifact_store = ArtifactStore::new(&config.artifact_dir);
     let web_access = Arc::new(
-        WebAccess::new(&config.search.provider, &config.search.base_url)
-            .context("failed to configure synthesis web access")?,
+        WebAccess::new(
+            &config.search.provider,
+            &config.search.base_url,
+            &config.search.engines,
+        )
+        .context("failed to configure synthesis web access")?,
     );
-    let runner = Arc::new(DockerRunner::new(
-        artifact_store.clone(),
-        &config.docker_runtime,
-    ));
+    let runner = Arc::new(
+        DockerRunner::new(
+            artifact_store.clone(),
+            registry.clone(),
+            &config.docker_runtime,
+            &config.http_mode,
+        )
+        .context("failed to configure runner HTTP mode")?,
+    );
     runner
         .ensure_ready()
         .await
@@ -209,7 +220,11 @@ impl Config {
                     .unwrap_or_else(|| "searxng".to_owned()),
                 base_url: configured("JITFORGE_SEARCH_BASE_URL", config.search.base_url)
                     .unwrap_or_else(|| "http://127.0.0.1:8888/".to_owned()),
+                engines: configured("JITFORGE_SEARCH_ENGINES", config.search.engines)
+                    .unwrap_or_else(|| "mojeek".to_owned()),
             },
+            http_mode: configured("JITFORGE_HTTP_MODE", config.http.mode)
+                .unwrap_or_else(|| "disabled".to_owned()),
         })
     }
 }

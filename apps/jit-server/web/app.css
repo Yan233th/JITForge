@@ -223,7 +223,7 @@ tbody tr.clickable:hover { background: rgba(22, 70, 216, .035); cursor: pointer;
 .description-cell { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; line-height: 1.4; }
 
 .badge { min-height: 22px; display: inline-flex; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: .2rem .46rem; color: var(--dim); background: transparent; font-size: .72rem; font-weight: 750; line-height: 1; white-space: nowrap; }
-.badge.ready { color: var(--lime); border-color: rgba(35, 116, 86, .22); background: var(--lime-soft); }
+.badge.ready, .badge.active { color: var(--lime); border-color: rgba(35, 116, 86, .22); background: var(--lime-soft); }
 .badge.running, .badge.queued, .badge.synthesizing, .badge.validating, .badge.building, .badge.repairing { color: var(--blue); border-color: rgba(22, 70, 216, .2); background: var(--blue-soft); }
 .badge.awaiting_input { color: var(--warning); border-color: rgba(140, 101, 30, .22); background: var(--warning-soft); }
 .badge.rejected, .badge.revoked, .badge.failed { color: var(--danger); border-color: rgba(181, 67, 61, .2); background: var(--danger-soft); }

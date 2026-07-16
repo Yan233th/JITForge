@@ -352,6 +352,8 @@ pub struct ToolArtifactManifest {
     pub input_format: IoFormat,
     pub output_format: IoFormat,
     pub source_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub http_capabilities: Vec<HttpCapabilityGrant>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -378,6 +380,38 @@ pub struct HttpCapability {
     #[serde(default)]
     pub query_keys: Vec<String>,
     pub purpose: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HttpCapabilityGrant {
+    pub approval_hash: String,
+    pub capability: HttpCapability,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HttpFixture {
+    pub request_url: String,
+    pub response_url: String,
+    pub status: u16,
+    pub content_type: String,
+    pub body: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HttpCapabilityApproval {
+    pub capability_hash: String,
+    pub capability: HttpCapability,
+    pub status: String,
+    pub approved_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revoked_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct HttpCapabilityApprovalList {
+    pub approvals: Vec<HttpCapabilityApproval>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

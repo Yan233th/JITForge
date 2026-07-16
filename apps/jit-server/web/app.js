@@ -28,7 +28,7 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
 }
 function statusText(value) {
-  return ({ queued: "排队中", running: "处理中", awaiting_input: "等待回答", ready: "已就绪", not_ready: "未就绪", failed: "失败", rejected: "已拒绝", revoked: "已撤销", deprecated: "已弃用", draft: "草稿", contract_ready: "契约就绪", synthesizing: "合成中", building: "构建中", validating: "验证中", repairing: "修复中", complete: "完成" })[value] || value;
+  return ({ queued: "排队中", running: "处理中", awaiting_input: "等待回答", active: "有效", ready: "已就绪", not_ready: "未就绪", failed: "失败", rejected: "已拒绝", revoked: "已撤销", deprecated: "已弃用", draft: "草稿", contract_ready: "契约就绪", synthesizing: "合成中", building: "构建中", validating: "验证中", repairing: "修复中", complete: "完成" })[value] || value;
 }
 function showToast(message) {
   const toast = $("#toast");
@@ -118,6 +118,7 @@ async function route() {
     if (hash === "#/tools") return await renderTools(view);
     if (hash.startsWith("#/register")) return renderRegister(view);
     if (hash === "#/jobs") return await renderJobs(view);
+    if (hash === "#/access") return await renderAccess(view);
     if (hash === "#/status") return await renderStatus(view);
     if (hash.startsWith("#/jobs/")) return await renderJob(view, decodeURIComponent(hash.slice(7)));
     if (hash.startsWith("#/tools/")) return await renderTool(view, decodeURIComponent(hash.slice(8)));
@@ -373,6 +374,47 @@ async function renderJob(view, jobId) {
       if (location.hash === `#/jobs/${jobId}`) route();
     }, 1000);
   }
+}
+
+async function renderAccess(view) {
+  setPage("外部访问", "Approved HTTP Access");
+  const response = await api("/v1/http-capabilities");
+  if (!response.approvals.length) {
+    view.append(panel("已批准的数据源", element("div", { className: "empty", text: "尚未批准任何外部数据源" })));
+    return;
+  }
+  const table = element("table");
+  table.append(tableHead(["状态", "目标", "查询键", "用途", "批准时间", "操作"]));
+  const body = element("tbody");
+  response.approvals.forEach((approval) => {
+    const capability = approval.capability;
+    const row = element("tr");
+    const action = element("td");
+    if (approval.status === "active") {
+      const revoke = element("button", { className: "danger small-button", text: "撤销", type: "button" });
+      revoke.addEventListener("click", async () => {
+        const reason = window.prompt("请输入撤销原因");
+        if (!reason?.trim()) return;
+        try {
+          await api(`/v1/http-capabilities/${encodeURIComponent(approval.capability_hash)}/revoke`, {
+            method: "POST", body: JSON.stringify({ reason: reason.trim() })
+          });
+          showToast("访问权限已撤销，依赖它的工具将停止联网调用"); route();
+        } catch (error) { showToast(error.message); }
+      });
+      action.append(revoke);
+    } else action.textContent = approval.revoked_reason || "已撤销";
+    row.append(
+      element("td", {}, badge(approval.status)),
+      element("td", { text: `${capability.method} ${capability.scheme}://${capability.host}${capability.path_prefix}` }),
+      element("td", { text: capability.query_keys.join(", ") || "无" }),
+      element("td", { className: "description-column", text: capability.purpose }),
+      element("td", { text: formatTime(approval.approved_at) }), action
+    );
+    body.append(row);
+  });
+  table.append(body);
+  view.append(panel("已批准的数据源", element("div", { className: "table-wrap" }, table)));
 }
 
 function jobInputPanel(job) {

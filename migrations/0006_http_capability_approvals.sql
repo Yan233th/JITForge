@@ -4,7 +4,8 @@ CREATE TABLE http_capability_approvals (
     status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
     approved_by_job UUID REFERENCES synthesis_jobs(id) ON DELETE SET NULL,
     approved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    revoked_at TIMESTAMPTZ
+    revoked_at TIMESTAMPTZ,
+    revoked_reason TEXT
 );
 
 CREATE INDEX http_capability_approvals_status_idx
