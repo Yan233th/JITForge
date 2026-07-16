@@ -21,9 +21,9 @@ const SESSION_COOKIE: &str = "jitforge_session";
 const SESSION_TTL_HOURS: i64 = 12;
 const MAX_SESSIONS: usize = 1024;
 
-const INDEX_HTML: &str = include_str!("../web/index.html");
-const APP_CSS: &str = include_str!("../web/app.css");
-const APP_JS: &str = include_str!("../web/app.js");
+const INDEX_HTML: &str = include_str!("../../../web/console/index.html");
+const APP_CSS: &str = include_str!("../../../web/console/app.css");
+const APP_JS: &str = include_str!("../../../web/console/app.js");
 
 #[derive(Clone, Debug)]
 pub struct WebSession {
