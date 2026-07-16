@@ -459,14 +459,22 @@ impl JobProcessor {
             "probe" => {
                 let args: ProbeArgs = parse_args(arguments)?;
                 validate_reason(&args.reason)?;
-                if workspace.metrics.probes_run >= MAX_PROBES {
-                    return Err(JobError::AgentLimit("probe budget exhausted".to_owned()));
-                }
                 validate_probe(&args)?;
                 let digest = workspace
                     .current_artifact_digest
                     .as_deref()
                     .ok_or_else(|| invalid_action("probe requires a built candidate"))?;
+                let fingerprint = probe_fingerprint(digest, &args)?;
+                if let Some(cached) = workspace.probe_results.get(&fingerprint) {
+                    let mut result = cached.clone();
+                    if let Some(object) = result.as_object_mut() {
+                        object.insert("reused".to_owned(), Value::Bool(true));
+                    }
+                    return Ok(ToolExecution::Continue(result));
+                }
+                if workspace.metrics.probes_run >= MAX_PROBES {
+                    return Err(JobError::AgentLimit("probe budget exhausted".to_owned()));
+                }
                 self.registry
                     .set_job_stage(job.job_id, &self.worker_id, JobStage::Validating)
                     .await?;
@@ -489,6 +497,7 @@ impl JobProcessor {
                     }),
                     Err(error) => json!({"ok": false, "error": error.to_string()}),
                 };
+                workspace.probe_results.insert(fingerprint, result.clone());
                 Ok(ToolExecution::Continue(result))
             }
             "review_generated_test" => {
@@ -1960,6 +1969,15 @@ fn validate_probe(args: &ProbeArgs) -> Result<(), JobError> {
     Ok(())
 }
 
+fn probe_fingerprint(digest: &str, args: &ProbeArgs) -> Result<String, JobError> {
+    let encoded = serde_json::to_vec(&json!({
+        "artifact_digest": digest,
+        "args": args.args,
+        "stdin": args.stdin
+    }))?;
+    Ok(format!("sha256:{}", hex::encode(Sha256::digest(encoded))))
+}
+
 fn parse_args<T: DeserializeOwned>(value: Value) -> Result<T, JobError> {
     Ok(serde_json::from_value(value)?)
 }
@@ -2376,6 +2394,90 @@ mod tests {
         .unwrap();
         assert_eq!(draft.user_test_count, 1);
         assert_eq!(draft.tests[0].name, "user-example-1");
+    }
+
+    #[test]
+    fn clarification_decision_keys_are_stable_and_bounded() {
+        for key in [
+            "input.whitespace_policy",
+            "example.2.output",
+            "network-source_1",
+        ] {
+            assert!(valid_decision_key(key), "{key}");
+        }
+        for key in ["", ".input", "input.", "Input.Policy", "input..policy"] {
+            assert!(!valid_decision_key(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn approved_example_correction_preserves_original_and_changes_effective_test() {
+        let mut job = claimed_job();
+        job.output_format = IoFormat::Json;
+        job.examples = vec![ToolExample {
+            input: "192.168.5.9/30".to_owned(),
+            output: r#"{"wildcard":"0.0.0.3,"prefix":30}"#.to_owned(),
+        }];
+        let args = RequestExampleCorrectionArgs {
+            example_index: 1,
+            corrected_input: "192.168.5.9/30".to_owned(),
+            corrected_output: r#"{"wildcard":"0.0.0.3","prefix":30}"#.to_owned(),
+            reason: "remove a stray quote from the registered oracle".to_owned(),
+        };
+        let correction = validate_example_correction(&job, &args).unwrap();
+        let mut workspace = AgentWorkspace::default();
+        apply_example_correction(&mut workspace, correction).unwrap();
+        let draft = validate_contract(
+            SubmitContractArgs {
+                summary: "CIDR facts".to_owned(),
+                assumptions: vec![],
+                invariants: vec![],
+                tests: vec![],
+                reason: "use the approved correction".to_owned(),
+            },
+            &job,
+            &workspace.example_corrections,
+            &[],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            job.examples[0].output,
+            r#"{"wildcard":"0.0.0.3,"prefix":30}"#
+        );
+        assert_eq!(
+            draft.tests[0].expected_stdout,
+            r#"{"wildcard":"0.0.0.3","prefix":30}"#
+        );
+    }
+
+    #[test]
+    fn identical_probe_fingerprints_ignore_explanatory_reason() {
+        let first = ProbeArgs {
+            args: vec!["--compact".to_owned()],
+            stdin: "sample".to_owned(),
+            reason: "first explanation".to_owned(),
+        };
+        let second = ProbeArgs {
+            reason: "different explanation".to_owned(),
+            ..ProbeArgs {
+                args: first.args.clone(),
+                stdin: first.stdin.clone(),
+                reason: String::new(),
+            }
+        };
+        assert_eq!(
+            probe_fingerprint("sha256:artifact", &first).unwrap(),
+            probe_fingerprint("sha256:artifact", &second).unwrap()
+        );
+        let changed = ProbeArgs {
+            stdin: "changed".to_owned(),
+            ..second
+        };
+        assert_ne!(
+            probe_fingerprint("sha256:artifact", &first).unwrap(),
+            probe_fingerprint("sha256:artifact", &changed).unwrap()
+        );
     }
 
     #[test]
