@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JITForge turns intent into validated, callable Unix tools.">
+  <title>JITForge — Tools, forged on demand</title>
+  <link rel="stylesheet" href="/assets/landing.css?v=20260716-1">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="JITForge home">
+        <span class="brand-mark" aria-hidden="true">JF</span>
+        <span>JITForge</span>
+      </a>
+      <span class="version">v0.1.0 / Linux</span>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="live-dot" aria-hidden="true"></span> Synthesis runtime online</p>
+          <h1 id="hero-title">Tools, forged<br>on demand.</h1>
+          <p class="lede">Turn an intent into a validated, versioned Unix tool—then call it from your terminal or manage it in the browser.</p>
+          <div class="actions">
+            <a class="button primary" href="/downloads/jit-linux-x86_64" download>
+              <span>Download CLI</span>
+              <span class="button-icon" aria-hidden="true">↓</span>
+            </a>
+            <a class="button secondary" href="/ui/">
+              <span>Open Console</span>
+              <span class="button-icon" aria-hidden="true">↗</span>
+            </a>
+          </div>
+          <p class="download-meta">jit 0.1.0 · Linux x86_64 · glibc 2.34+ · 4.2 MB</p>
+          <div class="quick-install">
+            <div class="quick-install-head">
+              <span class="quick-install-title">
+                <span>Install with curl</span>
+                <strong>Linux x86_64</strong>
+              </span>
+              <button id="copy-command" type="button">Copy</button>
+            </div>
+            <pre><code id="install-command">curl -fsSL &lt;this-host&gt;/downloads/jit-linux-x86_64 -o jit
+chmod +x jit
+./jit --version</code></pre>
+          </div>
+        </div>
+
+        <aside class="status-card" aria-labelledby="status-title">
+          <div class="status-head">
+            <div>
+              <p class="status-kicker">Live systems</p>
+              <h2 id="status-title">Service status</h2>
+            </div>
+            <span id="refresh-countdown" class="refresh-countdown" aria-live="polite">Refresh in 10s</span>
+          </div>
+
+          <div class="status-list">
+            <div class="status-row pending" data-endpoint="/healthz">
+              <span class="status-indicator" aria-hidden="true"></span>
+              <div class="status-name">
+                <code>/healthz</code>
+                <span>Server process</span>
+              </div>
+              <div class="status-value">
+                <strong>Checking</strong>
+                <span>—</span>
+              </div>
+            </div>
+
+            <div class="status-row pending" data-endpoint="/readyz">
+              <span class="status-indicator" aria-hidden="true"></span>
+              <div class="status-name">
+                <code>/readyz</code>
+                <span>Database &amp; worker</span>
+              </div>
+              <div class="status-value">
+                <strong>Checking</strong>
+                <span>—</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="status-foot">
+            <span>Automatic checks</span>
+            <span id="last-checked">Waiting for first response</span>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <footer>
+      <span>JITFORGE / 2026</span>
+      <span>Intent → artifact → invocation</span>
+    </footer>
+  </div>
+  <script src="/assets/landing.js?v=20260716-1" defer></script>
+</body>
+</html>
