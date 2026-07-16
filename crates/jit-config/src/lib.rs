@@ -54,6 +54,7 @@ pub struct WorkerConfig {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LlmConfig {
+    pub protocol: Option<String>,
     pub base_url: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
@@ -182,6 +183,7 @@ mod tests {
             artifact_dir = ".data/artifacts"
 
             [llm]
+            protocol = "chat_completions"
             model = "coder"
             "#,
         )
@@ -192,6 +194,7 @@ mod tests {
             Some("http://localhost:8080")
         );
         assert_eq!(config.llm.model.as_deref(), Some("coder"));
+        assert_eq!(config.llm.protocol.as_deref(), Some("chat_completions"));
         assert_eq!(
             config.server.artifact_dir.as_deref(),
             Some(".data/artifacts")

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use jit_artifact::{ToolContract, ToolTestCase};
@@ -8,10 +8,10 @@ use rig_core::{
     agent::ModelTurn,
     client::CompletionClient,
     completion::{
-        AssistantContent, CompletionError, CompletionModel as _, Message, ToolDefinition, Usage,
+        AssistantContent, CompletionError, CompletionModel, Message, ToolDefinition, Usage,
     },
     message::ToolChoice,
-    providers::openai,
+    providers::{anthropic, openai},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -162,47 +162,23 @@ pub trait Synthesizer: Send + Sync {
     ) -> Result<TestVerdict, SynthesisError>;
 }
 
-type RigModel = openai::completion::CompletionModel;
-
 #[derive(Clone)]
-pub struct OpenAiSynthesizer {
-    coder_model: RigModel,
-    verifier_model: RigModel,
+pub struct RigSynthesizer<M>
+where
+    M: CompletionModel,
+{
+    coder_model: M,
+    verifier_model: M,
     thinking: Option<Value>,
 }
 
-impl OpenAiSynthesizer {
-    pub fn new(
-        base_url: Option<String>,
-        api_key: Option<String>,
-        coder_model: Option<String>,
-        verifier_model: Option<String>,
-        thinking: &str,
-    ) -> Result<Self, SynthesisError> {
-        let base_url = required_setting("JITFORGE_LLM_BASE_URL or llm.base_url", base_url)?;
-        let api_key = required_setting("JITFORGE_LLM_API_KEY or llm.api_key", api_key)?;
-        let coder_model = required_setting("JITFORGE_LLM_MODEL or llm.model", coder_model)?;
-        let verifier_model = required_setting(
-            "JITFORGE_LLM_VERIFIER_MODEL or llm.verifier_model",
-            verifier_model,
-        )?;
-        let thinking = parse_thinking(thinking)?;
-        let client = openai::Client::builder()
-            .api_key(api_key)
-            .base_url(base_url.trim_end_matches('/'))
-            .build()
-            .map_err(|error| SynthesisError::InvalidConfig(error.to_string()))?
-            .completions_api();
-        Ok(Self {
-            coder_model: client.completion_model(coder_model),
-            verifier_model: client.completion_model(verifier_model),
-            thinking,
-        })
-    }
-
+impl<M> RigSynthesizer<M>
+where
+    M: CompletionModel,
+{
     async fn call_model(
         &self,
-        model: &RigModel,
+        model: &M,
         system: &str,
         prompt: &Message,
         history: &[Message],
@@ -294,7 +270,10 @@ impl OpenAiSynthesizer {
 }
 
 #[async_trait]
-impl Synthesizer for OpenAiSynthesizer {
+impl<M> Synthesizer for RigSynthesizer<M>
+where
+    M: CompletionModel + 'static,
+{
     async fn complete(&self, request: ModelRequest) -> Result<ModelTurn, SynthesisError> {
         self.call_model(
             &self.coder_model,
@@ -371,6 +350,68 @@ impl Synthesizer for OpenAiSynthesizer {
         Err(SynthesisError::InvalidAction(
             "verifier did not submit a valid verdict".to_owned(),
         ))
+    }
+}
+
+pub fn build_rig_synthesizer(
+    protocol: &str,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    coder_model: Option<String>,
+    verifier_model: Option<String>,
+    thinking: &str,
+) -> Result<Arc<dyn Synthesizer>, SynthesisError> {
+    let base_url = required_setting("JITFORGE_LLM_BASE_URL or llm.base_url", base_url)?;
+    let api_key = required_setting("JITFORGE_LLM_API_KEY or llm.api_key", api_key)?;
+    let coder_model = required_setting("JITFORGE_LLM_MODEL or llm.model", coder_model)?;
+    let verifier_model = required_setting(
+        "JITFORGE_LLM_VERIFIER_MODEL or llm.verifier_model",
+        verifier_model,
+    )?;
+    let thinking = parse_thinking(thinking)?;
+    let base_url = base_url.trim_end_matches('/');
+
+    match protocol.trim() {
+        "chat_completions" => {
+            let client = openai::Client::builder()
+                .api_key(api_key)
+                .base_url(base_url)
+                .build()
+                .map_err(|error| SynthesisError::InvalidConfig(error.to_string()))?
+                .completions_api();
+            Ok(Arc::new(RigSynthesizer {
+                coder_model: client.completion_model(coder_model),
+                verifier_model: client.completion_model(verifier_model),
+                thinking,
+            }))
+        }
+        "responses" => {
+            let client = openai::Client::builder()
+                .api_key(api_key)
+                .base_url(base_url)
+                .build()
+                .map_err(|error| SynthesisError::InvalidConfig(error.to_string()))?;
+            Ok(Arc::new(RigSynthesizer {
+                coder_model: client.completion_model(coder_model),
+                verifier_model: client.completion_model(verifier_model),
+                thinking,
+            }))
+        }
+        "anthropic_messages" => {
+            let client = anthropic::Client::builder()
+                .api_key(api_key)
+                .base_url(base_url)
+                .build()
+                .map_err(|error| SynthesisError::InvalidConfig(error.to_string()))?;
+            Ok(Arc::new(RigSynthesizer {
+                coder_model: client.completion_model(coder_model),
+                verifier_model: client.completion_model(verifier_model),
+                thinking,
+            }))
+        }
+        other => Err(SynthesisError::InvalidConfig(format!(
+            "unsupported LLM protocol {other:?}; expected chat_completions, responses, or anthropic_messages"
+        ))),
     }
 }
 
@@ -842,7 +883,9 @@ mod tests {
         stream.write_all(response.as_bytes()).await.unwrap();
     }
 
-    fn test_synthesizer(address: std::net::SocketAddr) -> OpenAiSynthesizer {
+    fn test_synthesizer(
+        address: std::net::SocketAddr,
+    ) -> RigSynthesizer<openai::completion::CompletionModel> {
         let client = openai::Client::builder()
             .api_key("test-key")
             .base_url(format!("http://{address}/v1"))
@@ -850,7 +893,7 @@ mod tests {
             .unwrap()
             .completions_api();
         let model = client.completion_model("model");
-        OpenAiSynthesizer {
+        RigSynthesizer {
             coder_model: model.clone(),
             verifier_model: model,
             thinking: None,
@@ -1023,7 +1066,7 @@ mod tests {
             .unwrap()
             .completions_api();
         let model = client.completion_model("model");
-        let synthesizer = OpenAiSynthesizer {
+        let synthesizer = RigSynthesizer {
             coder_model: model.clone(),
             verifier_model: model,
             thinking: None,

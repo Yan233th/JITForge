@@ -12,7 +12,7 @@ use jit_protocol::worker::runner_server::RunnerServer;
 use jit_storage::Registry;
 use runner::DockerRunner;
 use service::GrpcRunnerService;
-use synthesizer::{FixtureSynthesizer, OpenAiSynthesizer, Synthesizer};
+use synthesizer::{FixtureSynthesizer, Synthesizer, build_rig_synthesizer};
 use tokio::{signal, time::sleep};
 use tonic::transport::Server;
 use tracing::{error, info, warn};
@@ -37,6 +37,7 @@ struct Config {
 
 #[derive(Debug)]
 struct LlmSettings {
+    protocol: String,
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
@@ -177,6 +178,8 @@ impl Config {
             )
             .unwrap_or_else(|| "openai".to_owned()),
             llm: LlmSettings {
+                protocol: configured("JITFORGE_LLM_PROTOCOL", config.llm.protocol)
+                    .unwrap_or_else(|| "chat_completions".to_owned()),
                 base_url: configured("JITFORGE_LLM_BASE_URL", config.llm.base_url),
                 api_key: configured("JITFORGE_LLM_API_KEY", config.llm.api_key),
                 model: configured("JITFORGE_LLM_MODEL", config.llm.model),
@@ -201,17 +204,18 @@ fn configured(env_name: &str, file_value: Option<String>) -> Option<String> {
 
 fn build_synthesizer(mode: &str, llm: &LlmSettings) -> Result<Option<Arc<dyn Synthesizer>>> {
     match mode {
-        "openai" => Ok(Some(Arc::new(OpenAiSynthesizer::new(
+        "openai" | "rig" => Ok(Some(build_rig_synthesizer(
+            &llm.protocol,
             llm.base_url.clone(),
             llm.api_key.clone(),
             llm.model.clone(),
             llm.verifier_model.clone(),
             &llm.thinking,
-        )?))),
+        )?)),
         "fixture" => Ok(Some(Arc::new(FixtureSynthesizer))),
         "disabled" => Ok(None),
         other => bail!(
-            "unsupported JITFORGE_SYNTHESIZER_MODE {other:?}; expected openai, fixture, or disabled"
+            "unsupported JITFORGE_SYNTHESIZER_MODE {other:?}; expected rig, openai, fixture, or disabled"
         ),
     }
 }
