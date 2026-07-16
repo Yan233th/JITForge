@@ -1348,6 +1348,7 @@ dependencies = [
  "jit-storage",
  "serde",
  "serde_json",
+ "sha2",
  "subtle",
  "tokio",
  "tonic",
