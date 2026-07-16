@@ -119,12 +119,7 @@ services:
     ports:
       - "127.0.0.1:${JITFORGE_GATEWAY_PORT:-8090}:8080"
     volumes:
-      - ./deployments/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./deployments/nginx/html:/srv/jitforge/landing:ro
-      - type: bind
-        source: ${JITFORGE_DOWNLOAD_DIR:-./.data/downloads}
-        target: /srv/jitforge/downloads
-        read_only: true
+      - ./deployments/nginx:/etc/nginx/conf.d:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null || exit 1"]
       interval: 10s
