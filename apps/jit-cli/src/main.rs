@@ -10,8 +10,8 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use clap::{Args, Parser, Subcommand};
 use jit_config::JitForgeConfig;
 use jit_protocol::{
-    ErrorResponse, InvocationRequest, InvocationResponse, IoFormat, JobAnswerRequest,
-    JobInputAnswer, JobInputKind, JobResponse, JobStatus, MAX_INPUT_SAMPLE_BYTES,
+    CancelJobRequest, ErrorResponse, InvocationRequest, InvocationResponse, IoFormat,
+    JobAnswerRequest, JobInputAnswer, JobInputKind, JobResponse, JobStatus, MAX_INPUT_SAMPLE_BYTES,
     RegistrationRequest, RegistrationResponse, RevokeRequest, RevokeResponse, ToolExample,
     ToolListResponse, ToolSummaryResponse,
 };
@@ -108,6 +108,14 @@ enum Command {
 
         #[arg(long, requires = "reject")]
         reason: Option<String>,
+    },
+
+    /// Cancel a queued, running, or suspended synthesis job.
+    Cancel {
+        job_id: String,
+
+        #[arg(long, default_value = "cancelled from the CLI")]
+        reason: String,
     },
 
     /// List callable tools, optionally filtering by name or description.
@@ -227,7 +235,13 @@ async fn run(cli: &Cli) -> CliResult<i32> {
             no_wait,
             timeout,
         } => {
+            let stdin_is_piped = !io::stdin().is_terminal();
             let input_samples = read_registration_input_samples()?;
+            if stdin_is_piped && input_samples.is_empty() && !cli.json {
+                eprintln!(
+                    "jit: warning: piped stdin was empty; registering without an input sample"
+                );
+            }
             let request = RegistrationRequest {
                 intent: intent.clone(),
                 input_format: parse_io_format(input_format)?,
@@ -265,6 +279,10 @@ async fn run(cli: &Cli) -> CliResult<i32> {
 
             if !cli.json {
                 eprintln!("jit: job {}", registration.job_id);
+                eprintln!(
+                    "jit: Ctrl-C detaches locally; cancel remotely with `jit cancel {}`",
+                    registration.job_id
+                );
             }
 
             let job = wait_for_job(
@@ -431,6 +449,27 @@ async fn run(cli: &Cli) -> CliResult<i32> {
             } else {
                 println!("{}", answered.job_id);
                 eprintln!("jit: answer accepted; synthesis re-queued");
+            }
+            Ok(0)
+        }
+        Command::Cancel { job_id, reason } => {
+            let response = authenticated(
+                client
+                    .post(format!("{server}/v1/jobs/{job_id}/cancel"))
+                    .json(&CancelJobRequest {
+                        reason: reason.clone(),
+                    }),
+                token,
+            )
+            .send()
+            .await
+            .map_err(CliFailure::transport)?;
+            let job = decode_response::<JobResponse>(response).await?;
+            if cli.json {
+                print_json(&job)?;
+            } else {
+                println!("{}", job.job_id);
+                eprintln!("jit: cancelled {}@{}", job.tool, job.revision);
             }
             Ok(0)
         }

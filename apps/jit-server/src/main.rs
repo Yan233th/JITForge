@@ -17,10 +17,10 @@ use jit_artifact::{ArtifactError, ArtifactStore};
 use jit_config::{JitForgeConfig, nonempty_env};
 use jit_domain::{ToolIntent, ToolName};
 use jit_protocol::{
-    ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, JobAnswerRequest,
-    JobStatus, MAX_INPUT_SAMPLE_BYTES, MAX_INPUT_SAMPLES, MAX_INPUT_SAMPLES_TOTAL_BYTES,
-    ReadyResponse, RegistrationRequest, RevokeRequest, ToolArtifactManifest, ToolArtifactResponse,
-    ToolArtifactTestCase,
+    CancelJobRequest, ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse,
+    JobAnswerRequest, JobStatus, MAX_INPUT_SAMPLE_BYTES, MAX_INPUT_SAMPLES,
+    MAX_INPUT_SAMPLES_TOTAL_BYTES, ReadyResponse, RegistrationRequest, RevokeRequest,
+    ToolArtifactManifest, ToolArtifactResponse, ToolArtifactTestCase,
     worker::{ExecuteRequest, runner_client::RunnerClient},
 };
 use jit_storage::{Registry, StorageError};
@@ -149,6 +149,7 @@ fn build_router(state: AppState) -> Router {
         .route("/v1/tools/{name}/invocations", post(invoke_tool))
         .route("/v1/jobs", get(list_jobs))
         .route("/v1/jobs/{job_id}", get(get_job).post(answer_job_input))
+        .route("/v1/jobs/{job_id}/cancel", post(cancel_job))
         .route("/v1/http-capabilities", get(list_http_capability_approvals))
         .route(
             "/v1/http-capabilities/{capability_hash}/revoke",
@@ -317,6 +318,26 @@ async fn answer_job_input(
     let response = state
         .registry
         .answer_job_input(job_id, &request)
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(Json(response))
+}
+
+async fn cancel_job(
+    State(state): State<AppState>,
+    Path(raw_job_id): Path<String>,
+    Json(request): Json<CancelJobRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let job_id =
+        Uuid::parse_str(&raw_job_id).map_err(|_| ApiError::bad_request("job ID must be a UUID"))?;
+    state
+        .registry
+        .cancel_job(job_id, &request.reason)
+        .await
+        .map_err(ApiError::from_storage)?;
+    let response = state
+        .registry
+        .get_job(job_id)
         .await
         .map_err(ApiError::from_storage)?;
     Ok(Json(response))
@@ -743,6 +764,16 @@ impl ApiError {
                 StatusCode::NOT_FOUND,
                 "job_not_found",
                 "synthesis job not found",
+            ),
+            StorageError::JobNotCancellable(status) => Self::new(
+                StatusCode::CONFLICT,
+                "job_not_cancellable",
+                format!("synthesis job in status {status:?} cannot be cancelled"),
+            ),
+            StorageError::InvalidCancellationReason => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_cancellation_reason",
+                error.to_string(),
             ),
             StorageError::JobInputNotFound => Self::new(
                 StatusCode::CONFLICT,

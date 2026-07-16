@@ -252,6 +252,11 @@ pub struct JobAnswerRequest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CancelJobRequest {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobResponse {
     pub job_id: String,
     pub tool: String,

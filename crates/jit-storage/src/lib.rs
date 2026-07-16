@@ -795,6 +795,64 @@ impl Registry {
         Ok(())
     }
 
+    pub async fn cancel_job(&self, job_id: Uuid, reason: &str) -> Result<(), StorageError> {
+        let reason = reason.trim();
+        if reason.is_empty() || reason.len() > 4096 {
+            return Err(StorageError::InvalidCancellationReason);
+        }
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query("SELECT status FROM synthesis_jobs WHERE id = $1 FOR UPDATE")
+            .bind(job_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StorageError::JobNotFound)?;
+        let status: String = row.try_get("status")?;
+        if matches!(status.as_str(), "ready" | "rejected") {
+            return Err(StorageError::JobNotCancellable(status));
+        }
+        let details = serde_json::json!({"reason": reason});
+        sqlx::query(
+            "UPDATE synthesis_jobs
+             SET status = 'rejected', stage = 'complete', error_code = 'user_cancelled',
+                 error_message = 'synthesis job cancelled by user', details = $2,
+                 worker_id = NULL, lease_until = NULL, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(&details)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE tool_versions v
+             SET status = 'rejected', error_code = 'user_cancelled',
+                 error_message = 'synthesis job cancelled by user', updated_at = now()
+             FROM synthesis_jobs j
+             WHERE j.id = $1 AND v.tool_id = j.tool_id AND v.revision = j.revision",
+        )
+        .bind(job_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE synthesis_job_inputs
+             SET status = 'answered', answer = $2, answered_at = now()
+             WHERE job_id = $1 AND status = 'pending'",
+        )
+        .bind(job_id)
+        .bind(serde_json::json!({"type": "reject", "reason": reason}))
+        .execute(&mut *transaction)
+        .await?;
+        append_agent_event_in_transaction(
+            &mut transaction,
+            job_id,
+            "job_cancelled",
+            &details,
+            AGENT_TRACE_LIMIT_BYTES,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     pub async fn save_agent_checkpoint(
         &self,
         job_id: Uuid,
@@ -1639,6 +1697,12 @@ pub enum StorageError {
 
     #[error("synthesis job not found")]
     JobNotFound,
+
+    #[error("synthesis job in status {0:?} cannot be cancelled")]
+    JobNotCancellable(String),
+
+    #[error("cancellation reason must contain 1-4096 bytes")]
+    InvalidCancellationReason,
 
     #[error("pending synthesis job input was not found")]
     JobInputNotFound,
