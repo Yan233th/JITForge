@@ -49,7 +49,7 @@ impl IoFormat {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ToolExample {
     pub input: String,
     pub output: String,
@@ -193,6 +193,7 @@ pub struct JobError {
 pub enum JobInputKind {
     Clarification,
     SourceApproval,
+    ExampleCorrection,
 }
 
 impl JobInputKind {
@@ -200,6 +201,7 @@ impl JobInputKind {
         match self {
             Self::Clarification => "clarification",
             Self::SourceApproval => "source_approval",
+            Self::ExampleCorrection => "example_correction",
         }
     }
 
@@ -207,6 +209,7 @@ impl JobInputKind {
         match value {
             "clarification" => Some(Self::Clarification),
             "source_approval" => Some(Self::SourceApproval),
+            "example_correction" => Some(Self::ExampleCorrection),
             _ => None,
         }
     }

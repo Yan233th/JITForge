@@ -675,8 +675,13 @@ fn prompt_for_job_input(job: &JobResponse) -> CliResult<Option<JobAnswerRequest>
     }
 
     let answer = match pending.kind {
-        JobInputKind::SourceApproval => loop {
-            write!(tty, "Approve this source? [y/N] ").map_err(CliFailure::io)?;
+        JobInputKind::SourceApproval | JobInputKind::ExampleCorrection => loop {
+            let prompt = if pending.kind == JobInputKind::SourceApproval {
+                "Approve this source? [y/N] "
+            } else {
+                "Approve this example correction? [y/N] "
+            };
+            write!(tty, "{prompt}").map_err(CliFailure::io)?;
             tty.flush().map_err(CliFailure::io)?;
             let mut line = String::new();
             if reader.read_line(&mut line).map_err(CliFailure::io)? == 0 {

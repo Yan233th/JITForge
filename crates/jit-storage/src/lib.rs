@@ -1656,6 +1656,12 @@ fn validate_job_input_answer(
         {
             Ok(())
         }
+        (JobInputKind::ExampleCorrection, JobInputAnswer::Approve) => Ok(()),
+        (JobInputKind::ExampleCorrection, JobInputAnswer::Reject { reason })
+            if reason.as_ref().is_none_or(|reason| reason.len() <= 4096) =>
+        {
+            Ok(())
+        }
         _ => Err(StorageError::InvalidJobInputAnswer),
     }
 }

@@ -423,9 +423,13 @@ function jobInputPanel(job) {
     element("p", { text: input.prompt })
   ]);
   if (input.context && Object.keys(input.context).length) body.append(codeBlock(JSON.stringify(input.context, null, 2)));
-  if (input.kind === "source_approval") {
+  if (input.kind === "source_approval" || input.kind === "example_correction") {
     const actions = element("div", { className: "form-actions" });
-    const approve = element("button", { className: "primary", text: "批准此数据源", type: "button" });
+    const approve = element("button", {
+      className: "primary",
+      text: input.kind === "source_approval" ? "批准此数据源" : "批准样例修订",
+      type: "button"
+    });
     const reject = element("button", { className: "danger", text: "拒绝", type: "button" });
     approve.addEventListener("click", () => answerJobInput(job, { type: "approve" }));
     reject.addEventListener("click", () => answerJobInput(job, { type: "reject" }));

@@ -1,4 +1,8 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::Utc;
 use jit_artifact::{
@@ -6,7 +10,7 @@ use jit_artifact::{
 };
 use jit_protocol::{
     HttpCapability, HttpCapabilityGrant, HttpFixture, HttpMethod, IoFormat, JobInputAnswer,
-    JobInputChoice, JobInputKind, JobStage,
+    JobInputChoice, JobInputKind, JobStage, ToolExample,
 };
 use jit_storage::{ClaimedSynthesisJob, NewJobInput, PublishedArtifact, Registry, StorageError};
 use rig_core::{
@@ -25,9 +29,10 @@ use tracing::{error, info, warn};
 use crate::{
     runner::{DockerRunner, RunnerError},
     synthesizer::{
-        AGENT_SYSTEM_PROMPT, ContractReviewDecision, ContractReviewRequest, FixtureContext,
-        ModelRequest, SynthesisDraft, SynthesisError, Synthesizer, TestOrigin, TestVerdictKind,
-        TestVerificationRequest, ValidationFailureSnapshot, validate_reason, validate_source,
+        AGENT_SYSTEM_PROMPT, ApprovedExampleCorrection, ContractReviewDecision,
+        ContractReviewRequest, FixtureContext, ModelRequest, ResolvedDecision, SynthesisDraft,
+        SynthesisError, Synthesizer, TestOrigin, TestVerdictKind, TestVerificationRequest,
+        ValidationFailureSnapshot, validate_reason, validate_source,
     },
 };
 
@@ -323,6 +328,7 @@ impl JobProcessor {
                 let draft = validate_contract(
                     args,
                     job,
+                    &workspace.example_corrections,
                     &workspace.http_capabilities,
                     &workspace.http_probe_records,
                 )?;
@@ -333,6 +339,13 @@ impl JobProcessor {
                     output_format: job.output_format,
                     input_samples_without_expected_output: job.input_samples.clone(),
                     immutable_user_examples: job.examples.clone(),
+                    resolved_decisions: workspace.resolved_decisions.values().cloned().collect(),
+                    approved_example_corrections: workspace
+                        .example_corrections
+                        .values()
+                        .cloned()
+                        .collect(),
+                    prior_reviews: workspace.contract_reviews.clone(),
                     proposed_contract: draft.contract.clone(),
                     proposed_generated_tests: draft.tests[draft.user_test_count..].to_vec(),
                     approved_http_capabilities: workspace
@@ -353,6 +366,7 @@ impl JobProcessor {
                 )
                 .await?;
                 let review = self.synthesizer.review_contract(review_request).await?;
+                workspace.contract_reviews.push(review.clone());
                 self.event(
                     job,
                     "contract_review_response",
@@ -580,16 +594,34 @@ impl JobProcessor {
                 let args: RequestClarificationArgs = parse_args(arguments)?;
                 validate_reason(&args.reason)?;
                 validate_clarification(&args)?;
+                if let Some(decision) = workspace.resolved_decisions.get(&args.decision_key) {
+                    return Ok(ToolExecution::Continue(json!({
+                        "ok": true,
+                        "reused": true,
+                        "decision": decision
+                    })));
+                }
                 if let Some(answer) = self
                     .registry
                     .answered_job_input(job.job_id, &call.tool_call.id)
                     .await?
                 {
                     return match answer {
-                        JobInputAnswer::Text { text } => Ok(ToolExecution::Continue(json!({
-                            "ok": true,
-                            "answer": text
-                        }))),
+                        JobInputAnswer::Text { text } => {
+                            let decision = ResolvedDecision {
+                                key: args.decision_key.clone(),
+                                question: args.question.clone(),
+                                answer: text,
+                            };
+                            workspace
+                                .resolved_decisions
+                                .insert(args.decision_key, decision.clone());
+                            Ok(ToolExecution::Continue(json!({
+                                "ok": true,
+                                "reused": false,
+                                "decision": decision
+                            })))
+                        }
                         _ => Err(invalid_action(
                             "clarification resumed with a non-text answer",
                         )),
@@ -605,7 +637,73 @@ impl JobProcessor {
                             kind: JobInputKind::Clarification,
                             prompt: args.question,
                             choices: args.choices,
-                            context: json!({}),
+                            context: json!({"decision_key": args.decision_key}),
+                        },
+                    )
+                    .await?;
+                Err(JobError::AwaitingInput)
+            }
+            "request_example_correction" => {
+                let args: RequestExampleCorrectionArgs = parse_args(arguments)?;
+                validate_reason(&args.reason)?;
+                let correction = validate_example_correction(job, &args)?;
+                let index = correction.example_index - 1;
+                if let Some(existing) = workspace.example_corrections.get(&index) {
+                    if existing.corrected != correction.corrected {
+                        return Err(invalid_action(
+                            "this example already has a different approved correction",
+                        ));
+                    }
+                    return Ok(ToolExecution::Continue(json!({
+                        "ok": true,
+                        "approved": true,
+                        "reused": true,
+                        "correction": existing
+                    })));
+                }
+                if let Some(answer) = self
+                    .registry
+                    .answered_job_input(job.job_id, &call.tool_call.id)
+                    .await?
+                {
+                    return match answer {
+                        JobInputAnswer::Approve => {
+                            apply_example_correction(workspace, correction.clone())?;
+                            if workspace.source.is_some() && workspace.draft.is_some() {
+                                self.evaluate_after_mutation(job, workspace).await
+                            } else {
+                                Ok(ToolExecution::Continue(json!({
+                                    "ok": true,
+                                    "approved": true,
+                                    "reused": false,
+                                    "correction": correction
+                                })))
+                            }
+                        }
+                        JobInputAnswer::Reject { reason } => Ok(ToolExecution::Continue(json!({
+                            "ok": true,
+                            "approved": false,
+                            "reason": reason.unwrap_or_else(|| "user rejected the example correction".to_owned())
+                        }))),
+                        JobInputAnswer::Text { .. } => Err(invalid_action(
+                            "example correction resumed with a text answer",
+                        )),
+                    };
+                }
+                self.registry
+                    .suspend_job_for_input(
+                        job.job_id,
+                        &self.worker_id,
+                        &NewJobInput {
+                            id: uuid::Uuid::now_v7(),
+                            agent_call_id: call.tool_call.id.clone(),
+                            kind: JobInputKind::ExampleCorrection,
+                            prompt: format!(
+                                "Replace registered example #{} with this proposed correction?",
+                                correction.example_index
+                            ),
+                            choices: Vec::new(),
+                            context: serde_json::to_value(&correction)?,
                         },
                     )
                     .await?;
@@ -1017,6 +1115,14 @@ struct AgentWorkspace {
     http_capabilities: Vec<ApprovedHttpCapability>,
     #[serde(default)]
     http_probe_records: Vec<HttpProbeRecord>,
+    #[serde(default)]
+    resolved_decisions: BTreeMap<String, ResolvedDecision>,
+    #[serde(default)]
+    example_corrections: BTreeMap<usize, ApprovedExampleCorrection>,
+    #[serde(default)]
+    probe_results: BTreeMap<String, Value>,
+    #[serde(default)]
+    contract_reviews: Vec<crate::synthesizer::ContractReview>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -1101,9 +1207,18 @@ struct AbortArgs {
 
 #[derive(Deserialize)]
 struct RequestClarificationArgs {
+    decision_key: String,
     question: String,
     #[serde(default)]
     choices: Vec<JobInputChoice>,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+struct RequestExampleCorrectionArgs {
+    example_index: usize,
+    corrected_input: String,
+    corrected_output: String,
     reason: String,
 }
 
@@ -1184,7 +1299,11 @@ fn fixture_context(job: &ClaimedSynthesisJob, workspace: &AgentWorkspace) -> Fix
 
 fn available_tools(workspace: &mut AgentWorkspace) -> Vec<ToolDefinition> {
     workspace.metrics.turns = workspace.metrics.turns.saturating_add(1);
-    let mut tools = vec![abort_tool(), request_clarification_tool()];
+    let mut tools = vec![
+        abort_tool(),
+        request_clarification_tool(),
+        request_example_correction_tool(),
+    ];
     if workspace.metrics.web_searches < MAX_WEB_SEARCHES {
         tools.push(search_web_tool());
     }
@@ -1345,6 +1464,10 @@ fn request_clarification_tool() -> ToolDefinition {
             .to_owned(),
         parameters: object_schema(
             json!({
+                "decision_key": {
+                    "type": "string",
+                    "description": "Stable lowercase semantic key, for example input.whitespace_policy"
+                },
                 "question": {"type": "string"},
                 "choices": {
                     "type": "array",
@@ -1362,7 +1485,27 @@ fn request_clarification_tool() -> ToolDefinition {
                 },
                 "reason": {"type": "string"}
             }),
-            &["question", "choices", "reason"],
+            &["decision_key", "question", "choices", "reason"],
+        ),
+    }
+}
+
+fn request_example_correction_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "request_example_correction".to_owned(),
+        description: "Ask the user to approve an exact replacement for one malformed or contradictory registered example. The original remains in the audit history.".to_owned(),
+        parameters: object_schema(
+            json!({
+                "example_index": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "One-based index in immutable_user_examples"
+                },
+                "corrected_input": {"type": "string"},
+                "corrected_output": {"type": "string"},
+                "reason": {"type": "string"}
+            }),
+            &["example_index", "corrected_input", "corrected_output", "reason"],
         ),
     }
 }
@@ -1446,6 +1589,11 @@ fn probe_http_tool() -> ToolDefinition {
 }
 
 fn validate_clarification(args: &RequestClarificationArgs) -> Result<(), JobError> {
+    if !valid_decision_key(&args.decision_key) {
+        return Err(invalid_action(
+            "decision_key must contain 1-128 lowercase letters, digits, dots, underscores, or hyphens and start and end with a letter or digit",
+        ));
+    }
     if args.question.trim().is_empty() || args.question.len() > 4096 || args.choices.len() > 3 {
         return Err(invalid_action(
             "clarification question must contain 1-4096 bytes and at most three choices",
@@ -1463,6 +1611,89 @@ fn validate_clarification(args: &RequestClarificationArgs) -> Result<(), JobErro
     }) {
         return Err(invalid_action("clarification choices are invalid"));
     }
+    Ok(())
+}
+
+fn valid_decision_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+        })
+        && key
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && key.as_bytes().last().is_some_and(u8::is_ascii_alphanumeric)
+        && !key.contains("..")
+}
+
+fn validate_example_correction(
+    job: &ClaimedSynthesisJob,
+    args: &RequestExampleCorrectionArgs,
+) -> Result<ApprovedExampleCorrection, JobError> {
+    let index = args
+        .example_index
+        .checked_sub(1)
+        .filter(|index| *index < job.examples.len())
+        .ok_or_else(|| invalid_action("example_index does not identify a registered example"))?;
+    if args.corrected_input.len() > 1024 * 1024
+        || args.corrected_output.len() > 1024 * 1024
+        || args.corrected_input.contains('\0')
+        || args.corrected_output.contains('\0')
+    {
+        return Err(invalid_action(
+            "corrected example fields must be at most 1 MiB and contain no NUL bytes",
+        ));
+    }
+    let original = job.examples[index].clone();
+    let corrected = ToolExample {
+        input: args.corrected_input.clone(),
+        output: args.corrected_output.clone(),
+    };
+    if job.input_format == IoFormat::Json {
+        serde_json::from_str::<Value>(&corrected.input).map_err(|error| {
+            invalid_action(format!(
+                "corrected example input is not valid JSON: {error}"
+            ))
+        })?;
+    }
+    if job.output_format == IoFormat::Json {
+        serde_json::from_str::<Value>(&corrected.output).map_err(|error| {
+            invalid_action(format!(
+                "corrected example output is not valid JSON: {error}"
+            ))
+        })?;
+    }
+    if original == corrected {
+        return Err(invalid_action(
+            "example correction must change the registered example",
+        ));
+    }
+    Ok(ApprovedExampleCorrection {
+        example_index: args.example_index,
+        original,
+        corrected,
+        reason: args.reason.clone(),
+    })
+}
+
+fn apply_example_correction(
+    workspace: &mut AgentWorkspace,
+    correction: ApprovedExampleCorrection,
+) -> Result<(), JobError> {
+    let index = correction.example_index - 1;
+    if let Some(draft) = workspace.draft.as_mut() {
+        if index >= draft.user_test_count {
+            return Err(invalid_action(
+                "approved correction does not identify a user example test",
+            ));
+        }
+        draft.tests[index].stdin = correction.corrected.input.clone();
+        draft.tests[index].expected_stdout = correction.corrected.output.clone();
+    }
+    workspace.example_corrections.insert(index, correction);
+    workspace.latest_failure = None;
     Ok(())
 }
 
@@ -1585,6 +1816,7 @@ fn object_schema(properties: Value, required: &[&str]) -> Value {
 fn validate_contract(
     mut args: SubmitContractArgs,
     job: &ClaimedSynthesisJob,
+    example_corrections: &BTreeMap<usize, ApprovedExampleCorrection>,
     http_capabilities: &[ApprovedHttpCapability],
     http_probe_records: &[HttpProbeRecord],
 ) -> Result<SynthesisDraft, JobError> {
@@ -1605,9 +1837,19 @@ fn validate_contract(
     }
     args.tests.truncate(12);
     let recorded_fixtures = probe_records_to_fixtures(http_probe_records);
-    let mut tests: Vec<ToolTestCase> = job
+    let effective_examples = job
         .examples
         .iter()
+        .enumerate()
+        .map(|(index, example)| {
+            example_corrections
+                .get(&index)
+                .map(|correction| &correction.corrected)
+                .unwrap_or(example)
+        })
+        .collect::<Vec<_>>();
+    let mut tests: Vec<ToolTestCase> = effective_examples
+        .into_iter()
         .enumerate()
         .map(|(index, example)| ToolTestCase {
             name: format!("user-example-{}", index + 1),
@@ -2127,6 +2369,7 @@ mod tests {
                 reason: "test".to_owned(),
             },
             &job,
+            &BTreeMap::new(),
             &[],
             &[],
         )
@@ -2168,6 +2411,7 @@ mod tests {
                 reason: "first attempt".to_owned(),
             },
             &job,
+            &BTreeMap::new(),
             &[],
             &[],
         );
@@ -2189,6 +2433,7 @@ mod tests {
                 reason: "add a concrete test".to_owned(),
             },
             &job,
+            &BTreeMap::new(),
             &[],
             &[],
         )
