@@ -1,4 +1,11 @@
 services:
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./deployments/searxng/settings.yml:/etc/searxng/settings.yml:ro
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -44,6 +51,8 @@ services:
       JITFORGE_LLM_MODEL: ${JITFORGE_LLM_MODEL-}
       JITFORGE_LLM_VERIFIER_MODEL: ${JITFORGE_LLM_VERIFIER_MODEL-}
       JITFORGE_LLM_THINKING: ${JITFORGE_LLM_THINKING-}
+      JITFORGE_SEARCH_PROVIDER: ${JITFORGE_SEARCH_PROVIDER-searxng}
+      JITFORGE_SEARCH_BASE_URL: ${JITFORGE_SEARCH_BASE_URL-http://searxng:8080/}
     depends_on:
       postgres:
         condition: service_healthy

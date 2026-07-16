@@ -3,10 +3,11 @@ use std::{collections::HashSet, str::FromStr, time::Duration};
 use chrono::{DateTime, Utc};
 use jit_domain::{ToolName, ToolVersionStatus};
 use jit_protocol::{
-    IoFormat, JobAnswerRequest, JobError, JobInputAnswer, JobInputChoice, JobInputKind,
-    JobListResponse, JobResponse, JobStage, JobStatus, PendingJobInput, RegistrationRequest,
-    RegistrationResponse, RevokeResponse, ToolExample, ToolListItem, ToolListResponse,
-    ToolSummaryResponse, ToolVersionListItem, ToolVersionListResponse, ToolVersionSummary,
+    HttpCapability, IoFormat, JobAnswerRequest, JobError, JobInputAnswer, JobInputChoice,
+    JobInputKind, JobListResponse, JobResponse, JobStage, JobStatus, PendingJobInput,
+    RegistrationRequest, RegistrationResponse, RevokeResponse, ToolExample, ToolListItem,
+    ToolListResponse, ToolSummaryResponse, ToolVersionListItem, ToolVersionListResponse,
+    ToolVersionSummary,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -558,6 +559,47 @@ impl Registry {
         )
         .bind(worker_id)
         .bind(version)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn is_http_capability_approved(
+        &self,
+        capability_hash: &str,
+    ) -> Result<bool, StorageError> {
+        let approved = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM http_capability_approvals
+                WHERE capability_hash = $1 AND status = 'active'
+            )",
+        )
+        .bind(capability_hash)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(approved)
+    }
+
+    pub async fn approve_http_capability(
+        &self,
+        capability_hash: &str,
+        capability: &HttpCapability,
+        job_id: Uuid,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO http_capability_approvals
+             (capability_hash, capability, status, approved_by_job)
+             VALUES ($1, $2, 'active', $3)
+             ON CONFLICT (capability_hash) DO UPDATE
+             SET capability = excluded.capability,
+                 status = 'active',
+                 approved_by_job = excluded.approved_by_job,
+                 approved_at = now(),
+                 revoked_at = NULL",
+        )
+        .bind(capability_hash)
+        .bind(serde_json::to_value(capability)?)
+        .bind(job_id)
         .execute(&self.pool)
         .await?;
         Ok(())

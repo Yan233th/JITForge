@@ -354,6 +354,32 @@ pub struct ToolArtifactManifest {
     pub source_sha256: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum HttpMethod {
+    Get,
+}
+
+impl HttpMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HttpCapability {
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub method: HttpMethod,
+    pub path_prefix: String,
+    #[serde(default)]
+    pub query_keys: Vec<String>,
+    pub purpose: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ToolArtifactTestCase {
     pub name: String,

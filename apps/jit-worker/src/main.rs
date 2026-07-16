@@ -2,6 +2,7 @@ mod jobs;
 mod runner;
 mod service;
 mod synthesizer;
+mod web_access;
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -18,6 +19,7 @@ use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
+use web_access::WebAccess;
 
 const DEFAULT_DATABASE_URL: &str = "postgres://jitforge:jitforge@127.0.0.1:5432/jitforge";
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:50051";
@@ -33,6 +35,7 @@ struct Config {
     docker_runtime: String,
     synthesizer_mode: String,
     llm: LlmSettings,
+    search: SearchSettings,
 }
 
 #[derive(Debug)]
@@ -45,6 +48,12 @@ struct LlmSettings {
     thinking: String,
 }
 
+#[derive(Debug)]
+struct SearchSettings {
+    provider: String,
+    base_url: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
@@ -54,6 +63,10 @@ async fn main() -> Result<()> {
         .context("failed to connect to PostgreSQL")?;
     registry.migrate().await?;
     let artifact_store = ArtifactStore::new(&config.artifact_dir);
+    let web_access = Arc::new(
+        WebAccess::new(&config.search.provider, &config.search.base_url)
+            .context("failed to configure synthesis web access")?,
+    );
     let runner = Arc::new(DockerRunner::new(
         artifact_store.clone(),
         &config.docker_runtime,
@@ -96,6 +109,7 @@ async fn main() -> Result<()> {
             artifact_store,
             runner.clone(),
             synthesizer,
+            web_access,
             config.worker_id.clone(),
         );
         tokio::spawn(processor.run());
@@ -189,6 +203,12 @@ impl Config {
                 ),
                 thinking: configured("JITFORGE_LLM_THINKING", config.llm.thinking)
                     .unwrap_or_else(|| "auto".to_owned()),
+            },
+            search: SearchSettings {
+                provider: configured("JITFORGE_SEARCH_PROVIDER", config.search.provider)
+                    .unwrap_or_else(|| "searxng".to_owned()),
+                base_url: configured("JITFORGE_SEARCH_BASE_URL", config.search.base_url)
+                    .unwrap_or_else(|| "http://127.0.0.1:8888/".to_owned()),
             },
         })
     }
