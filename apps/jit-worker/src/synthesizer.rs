@@ -19,7 +19,7 @@ use thiserror::Error;
 use tokio::time::{sleep, timeout};
 use tracing::warn;
 
-const MODEL_TIMEOUT: Duration = Duration::from_secs(300);
+const MODEL_TIMEOUT: Duration = Duration::from_secs(90);
 const MODEL_CONTEXT_LIMIT: usize = 1024 * 1024;
 const MODEL_PROTOCOL_RETRIES: usize = 1;
 const PROVIDER_RETRY_DELAYS: [Duration; 3] = [
@@ -174,6 +174,11 @@ where
     thinking: Option<Value>,
 }
 
+struct ModelCallOptions {
+    tool_choice: ToolChoice,
+    retry_provider: bool,
+}
+
 impl<M> RigSynthesizer<M>
 where
     M: CompletionModel,
@@ -185,7 +190,7 @@ where
         prompt: &Message,
         history: &[Message],
         tools: &[ToolDefinition],
-        tool_choice: ToolChoice,
+        options: ModelCallOptions,
     ) -> Result<ModelTurn, SynthesisError> {
         let names: BTreeSet<String> = tools.iter().map(|tool| tool.name.clone()).collect();
         let mut provider_attempt = 0;
@@ -210,7 +215,7 @@ where
                 .preamble(system.to_owned())
                 .messages(request_history.clone())
                 .tools(tools.to_vec())
-                .tool_choice(tool_choice.clone())
+                .tool_choice(options.tool_choice.clone())
                 .temperature(0.0)
                 .additional_params_opt(self.thinking.clone())
                 .send();
@@ -247,7 +252,9 @@ where
                     ));
                 }
                 Ok(Err(error))
-                    if provider_attempt < PROVIDER_RETRY_DELAYS.len() && retryable(&error) =>
+                    if options.retry_provider
+                        && provider_attempt < PROVIDER_RETRY_DELAYS.len()
+                        && retryable(&error) =>
                 {
                     let delay = PROVIDER_RETRY_DELAYS[provider_attempt];
                     provider_attempt += 1;
@@ -255,7 +262,9 @@ where
                     sleep(delay).await;
                 }
                 Ok(Err(error)) => return Err(SynthesisError::Model(error.to_string())),
-                Err(_) if provider_attempt < PROVIDER_RETRY_DELAYS.len() => {
+                Err(_)
+                    if options.retry_provider && provider_attempt < PROVIDER_RETRY_DELAYS.len() =>
+                {
                     let delay = PROVIDER_RETRY_DELAYS[provider_attempt];
                     provider_attempt += 1;
                     warn!(
@@ -277,15 +286,37 @@ where
     M: CompletionModel + 'static,
 {
     async fn complete(&self, request: ModelRequest) -> Result<ModelTurn, SynthesisError> {
-        self.call_model(
-            &self.coder_model,
-            &request.system,
-            &request.prompt,
-            &request.history,
-            &request.tools,
-            ToolChoice::Required,
-        )
-        .await
+        let primary = self
+            .call_model(
+                &self.coder_model,
+                &request.system,
+                &request.prompt,
+                &request.history,
+                &request.tools,
+                ModelCallOptions {
+                    tool_choice: ToolChoice::Required,
+                    retry_provider: false,
+                },
+            )
+            .await;
+        match primary {
+            Err(error @ (SynthesisError::Model(_) | SynthesisError::ModelTimeout)) => {
+                warn!(%error, "primary coder model unavailable; retrying turn with fallback model");
+                self.call_model(
+                    &self.verifier_model,
+                    &request.system,
+                    &request.prompt,
+                    &request.history,
+                    &request.tools,
+                    ModelCallOptions {
+                        tool_choice: ToolChoice::Auto,
+                        retry_provider: true,
+                    },
+                )
+                .await
+            }
+            result => result,
+        }
     }
 
     async fn review_contract(
@@ -309,7 +340,10 @@ where
                     &prompt,
                     &[],
                     std::slice::from_ref(&tool),
-                    ToolChoice::Auto,
+                    ModelCallOptions {
+                        tool_choice: ToolChoice::Auto,
+                        retry_provider: true,
+                    },
                 )
                 .await?;
             if let Ok(review) = parse_contract_review_turn(&turn) {
@@ -342,7 +376,10 @@ where
                     &prompt,
                     &[],
                     std::slice::from_ref(&tool),
-                    ToolChoice::Auto,
+                    ModelCallOptions {
+                        tool_choice: ToolChoice::Auto,
+                        retry_provider: true,
+                    },
                 )
                 .await?;
             if let Ok(verdict) = parse_verifier_turn(&turn) {

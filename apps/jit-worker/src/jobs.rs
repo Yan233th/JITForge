@@ -34,7 +34,7 @@ use crate::{
 const JOB_LEASE_SECONDS: i64 = 300;
 const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_JOB_ATTEMPTS: u32 = 3;
-const MAX_AGENT_TURNS: usize = 9;
+const MAX_AGENT_TURNS: usize = 24;
 const MAX_SOURCE_REVISIONS: u32 = 4;
 const MAX_GENERATED_TEST_CORRECTIONS: u32 = 3;
 const MAX_PROBES: u32 = 3;
