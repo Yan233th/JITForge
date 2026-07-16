@@ -242,6 +242,7 @@ impl Registry {
         &self,
         query: &str,
         include_unready: bool,
+        status: Option<ToolVersionStatus>,
         limit: u32,
         offset: u64,
     ) -> Result<ToolListResponse, StorageError> {
@@ -261,18 +262,20 @@ impl Registry {
                ON v.tool_id = t.id
               AND v.revision = COALESCE(t.stable_revision, t.latest_revision)
              WHERE ($1 OR t.stable_revision IS NOT NULL)
-               AND ($2 = ''
-                    OR strpos(lower(t.name), lower($2)) > 0
-                    OR strpos(lower(v.description), lower($2)) > 0)
+               AND ($2::text IS NULL OR v.status = $2)
+               AND ($3 = ''
+                    OR strpos(lower(t.name), lower($3)) > 0
+                    OR strpos(lower(v.description), lower($3)) > 0)
              ORDER BY CASE
-                        WHEN lower(t.name) = lower($2) THEN 0
-                        WHEN left(lower(t.name), char_length($2)) = lower($2) THEN 1
+                        WHEN lower(t.name) = lower($3) THEN 0
+                        WHEN left(lower(t.name), char_length($3)) = lower($3) THEN 1
                         ELSE 2
                       END,
                       t.name
-             LIMIT $3 OFFSET $4",
+             LIMIT $4 OFFSET $5",
         )
         .bind(include_unready)
+        .bind(status.map(ToolVersionStatus::as_str))
         .bind(query)
         .bind(row_limit)
         .bind(offset)

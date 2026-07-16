@@ -169,8 +169,6 @@ main { min-width: 0; padding: 2rem clamp(1.3rem, 3.4vw, 3.6rem) 5rem; }
 .toolbar { min-height: 41px; display: flex; flex-wrap: wrap; align-items: center; gap: .62rem; margin-bottom: .95rem; }
 .toolbar input[type="search"] { flex: 1 1 310px; max-width: 650px; }
 .toolbar select { width: auto; min-width: 160px; }
-.inline-check { min-height: 41px; display: flex; grid-template-columns: none; align-items: center; gap: .44rem; padding: 0 .2rem; white-space: nowrap; font-family: var(--sans); font-size: .86rem; font-weight: 600; }
-.inline-check input { width: 14px; min-height: 14px; accent-color: var(--accent); }
 .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .88rem; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .88rem; }
 

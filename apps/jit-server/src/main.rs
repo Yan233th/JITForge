@@ -1,6 +1,6 @@
 mod web;
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, str::FromStr};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -15,7 +15,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use jit_artifact::{ArtifactError, ArtifactStore};
 use jit_config::{JitForgeConfig, nonempty_env};
-use jit_domain::{ToolIntent, ToolName};
+use jit_domain::{ToolIntent, ToolName, ToolVersionStatus};
 use jit_protocol::{
     CancelJobRequest, ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse,
     JobAnswerRequest, JobStatus, MAX_INPUT_SAMPLE_BYTES, MAX_INPUT_SAMPLES,
@@ -404,6 +404,7 @@ struct ListToolsQuery {
     query: String,
     #[serde(default)]
     include_unready: bool,
+    status: Option<String>,
     limit: Option<u32>,
     offset: Option<u64>,
 }
@@ -425,9 +426,25 @@ async fn list_tools(
     if offset > i64::MAX as u64 {
         return Err(ApiError::bad_request("offset is too large"));
     }
+    let status = query
+        .status
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            ToolVersionStatus::from_str(value).map_err(|_| {
+                ApiError::bad_request(format!("unknown tool version status {value:?}"))
+            })
+        })
+        .transpose()?;
     let response = state
         .registry
-        .list_tools(&query.query, query.include_unready, limit, offset)
+        .list_tools(
+            &query.query,
+            query.include_unready || status.is_some(),
+            status,
+            limit,
+            offset,
+        )
         .await
         .map_err(ApiError::from_storage)?;
     Ok(Json(response))
