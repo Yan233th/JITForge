@@ -190,14 +190,19 @@ async function renderStatus(view) {
   await load();
 }
 
-async function renderTools(view, offset = 0, search = "", includeUnready = false) {
+async function renderTools(view, offset = 0, search = "", status = "ready") {
   setPage("工具", "Capabilities", { text: "注册新工具", href: "#/register" });
   const searchInput = element("input", { type: "search", value: search, placeholder: "搜索名称或能力描述" });
-  const include = element("input", { type: "checkbox" });
-  include.checked = includeUnready;
+  const statusSelect = element("select");
+  [
+    ["ready", "已就绪"], ["", "全部状态"], ["draft", "草稿"], ["contract_ready", "契约就绪"],
+    ["synthesizing", "合成中"], ["building", "构建中"], ["validating", "验证中"],
+    ["rejected", "已拒绝"], ["deprecated", "已弃用"], ["revoked", "已撤销"]
+  ].forEach(([value, text]) => statusSelect.append(element("option", { value, text })));
+  statusSelect.value = status;
   const form = element("form", { className: "toolbar" }, [
     searchInput,
-    element("label", { className: "inline-check" }, [include, document.createTextNode("包含未就绪/已撤销")]),
+    statusSelect,
     element("button", { className: "primary compact-button", text: "搜索", type: "submit" })
   ]);
   const resultMeta = element("span", { className: "panel-meta", text: "加载中" });
@@ -210,7 +215,9 @@ async function renderTools(view, offset = 0, search = "", includeUnready = false
     if (state.toolsController) state.toolsController.abort();
     const controller = new AbortController();
     state.toolsController = controller;
-    const parameters = new URLSearchParams({ query: searchInput.value.trim(), include_unready: String(include.checked), limit: "50", offset: String(nextOffset) });
+    const parameters = new URLSearchParams({ query: searchInput.value.trim(), limit: "50", offset: String(nextOffset) });
+    if (statusSelect.value) parameters.set("status", statusSelect.value);
+    else parameters.set("include_unready", "true");
     results.classList.add("updating");
     resultMeta.textContent = "正在更新…";
     try {
