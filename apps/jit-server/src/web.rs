@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use axum::{
@@ -10,8 +10,10 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use jit_protocol::{SessionLoginRequest, SessionResponse};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{ApiError, AppState, constant_time_eq};
@@ -89,7 +91,7 @@ pub async fn root() -> Redirect {
 }
 
 pub async fn index() -> Response {
-    static_response("text/html; charset=utf-8", INDEX_HTML)
+    static_response("text/html; charset=utf-8", versioned_index())
 }
 
 pub async fn css() -> Response {
@@ -98,6 +100,20 @@ pub async fn css() -> Response {
 
 pub async fn js() -> Response {
     static_response("text/javascript; charset=utf-8", APP_JS)
+}
+
+fn versioned_index() -> &'static str {
+    static VERSIONED_INDEX: OnceLock<String> = OnceLock::new();
+    VERSIONED_INDEX.get_or_init(|| {
+        let mut hasher = Sha256::new();
+        hasher.update(APP_CSS.as_bytes());
+        hasher.update([0]);
+        hasher.update(APP_JS.as_bytes());
+        let version = URL_SAFE_NO_PAD.encode(hasher.finalize());
+        INDEX_HTML
+            .replace("/ui/app.css", &format!("/ui/app.css?v={version}"))
+            .replace("/ui/app.js", &format!("/ui/app.js?v={version}"))
+    })
 }
 
 pub async fn login(
@@ -258,5 +274,14 @@ mod tests {
         assert!(response.headers().contains_key("content-security-policy"));
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         assert_eq!(response.headers()["referrer-policy"], "no-referrer");
+    }
+
+    #[test]
+    fn index_uses_content_versioned_asset_urls() {
+        let index = versioned_index();
+        assert!(index.contains("/ui/app.css?v="));
+        assert!(index.contains("/ui/app.js?v="));
+        assert!(!index.contains("href=\"/ui/app.css\""));
+        assert!(!index.contains("src=\"/ui/app.js\""));
     }
 }

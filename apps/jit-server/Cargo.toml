@@ -16,6 +16,7 @@ jit-protocol = { path = "../../crates/jit-protocol" }
 jit-storage = { path = "../../crates/jit-storage" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 subtle.workspace = true
 tokio.workspace = true
 tonic.workspace = true
