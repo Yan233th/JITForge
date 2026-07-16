@@ -3,7 +3,8 @@ use std::{collections::HashSet, str::FromStr, time::Duration};
 use chrono::{DateTime, Utc};
 use jit_domain::{ToolName, ToolVersionStatus};
 use jit_protocol::{
-    IoFormat, JobError, JobListResponse, JobResponse, JobStage, JobStatus, RegistrationRequest,
+    IoFormat, JobAnswerRequest, JobError, JobInputAnswer, JobInputChoice, JobInputKind,
+    JobListResponse, JobResponse, JobStage, JobStatus, PendingJobInput, RegistrationRequest,
     RegistrationResponse, RevokeResponse, ToolExample, ToolListItem, ToolListResponse,
     ToolSummaryResponse, ToolVersionListItem, ToolVersionListResponse, ToolVersionSummary,
 };
@@ -175,10 +176,14 @@ impl Registry {
         let row = sqlx::query(
             "SELECT j.id, t.name, j.revision, j.status AS job_status, j.stage,
                     v.status AS version_status, j.error_code, j.error_message, j.details,
-                    j.created_at, j.updated_at
+                    j.created_at, j.updated_at,
+                    qi.id AS input_id, qi.kind AS input_kind, qi.prompt AS input_prompt,
+                    qi.choices AS input_choices, qi.context AS input_context,
+                    qi.created_at AS input_created_at
              FROM synthesis_jobs j
              JOIN tools t ON t.id = j.tool_id
              JOIN tool_versions v ON v.tool_id = j.tool_id AND v.revision = j.revision
+             LEFT JOIN synthesis_job_inputs qi ON qi.job_id = j.id AND qi.status = 'pending'
              WHERE j.id = $1",
         )
         .bind(job_id)
@@ -203,10 +208,14 @@ impl Registry {
         let mut rows = sqlx::query(
             "SELECT j.id, t.name, j.revision, j.status AS job_status, j.stage,
                     v.status AS version_status, j.error_code, j.error_message, j.details,
-                    j.created_at, j.updated_at
+                    j.created_at, j.updated_at,
+                    qi.id AS input_id, qi.kind AS input_kind, qi.prompt AS input_prompt,
+                    qi.choices AS input_choices, qi.context AS input_context,
+                    qi.created_at AS input_created_at
              FROM synthesis_jobs j
              JOIN tools t ON t.id = j.tool_id
              JOIN tool_versions v ON v.tool_id = j.tool_id AND v.revision = j.revision
+             LEFT JOIN synthesis_job_inputs qi ON qi.job_id = j.id AND qi.status = 'pending'
              WHERE ($1::text IS NULL OR j.status = $1)
              ORDER BY j.created_at DESC, j.id DESC
              LIMIT $2 OFFSET $3",
@@ -579,8 +588,11 @@ impl Registry {
         sqlx::query(
             "UPDATE synthesis_jobs
              SET status = 'running',
-                 stage = CASE WHEN status = 'queued' THEN 'contract' ELSE stage END,
-                 attempts = attempts + 1,
+                 stage = CASE WHEN status = 'queued' AND stage = 'queued' THEN 'contract' ELSE stage END,
+                 attempts = attempts + CASE
+                     WHEN status = 'queued' AND stage <> 'queued' THEN 0
+                     ELSE 1
+                 END,
                  worker_id = $2,
                  lease_until = now() + ($3::bigint * interval '1 second'),
                  updated_at = now()
@@ -702,6 +714,163 @@ impl Registry {
         Ok(())
     }
 
+    pub async fn suspend_job_for_input(
+        &self,
+        job_id: Uuid,
+        worker_id: &str,
+        input: &NewJobInput,
+    ) -> Result<Uuid, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT stage FROM synthesis_jobs
+             WHERE id = $1 AND worker_id = $2 AND status = 'running'
+             FOR UPDATE",
+        )
+        .bind(job_id)
+        .bind(worker_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::JobLeaseLost)?;
+        let resume_stage: String = row.try_get("stage")?;
+        if matches!(
+            resume_stage.as_str(),
+            "queued" | "awaiting_input" | "complete"
+        ) {
+            return Err(StorageError::Invariant(format!(
+                "cannot suspend a job from stage {resume_stage:?}"
+            )));
+        }
+
+        if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM synthesis_job_inputs
+             WHERE job_id = $1 AND agent_call_id = $2",
+        )
+        .bind(job_id)
+        .bind(&input.agent_call_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        {
+            transaction.commit().await?;
+            return Ok(existing);
+        }
+
+        sqlx::query(
+            "INSERT INTO synthesis_job_inputs
+             (id, job_id, agent_call_id, kind, prompt, choices, context, resume_stage)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(input.id)
+        .bind(job_id)
+        .bind(&input.agent_call_id)
+        .bind(input.kind.as_str())
+        .bind(&input.prompt)
+        .bind(serde_json::to_value(&input.choices)?)
+        .bind(&input.context)
+        .bind(&resume_stage)
+        .execute(&mut *transaction)
+        .await?;
+        append_agent_event_in_transaction(
+            &mut transaction,
+            job_id,
+            "input_requested",
+            &serde_json::json!({
+                "input_id": input.id,
+                "kind": input.kind,
+                "prompt": input.prompt,
+                "context": input.context
+            }),
+            AGENT_TRACE_LIMIT_BYTES - AGENT_TERMINAL_EVENT_RESERVE_BYTES,
+        )
+        .await?;
+        sqlx::query(
+            "UPDATE synthesis_jobs
+             SET status = 'awaiting_input', stage = 'awaiting_input',
+                 worker_id = NULL, lease_until = NULL, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(input.id)
+    }
+
+    pub async fn answered_job_input(
+        &self,
+        job_id: Uuid,
+        agent_call_id: &str,
+    ) -> Result<Option<JobInputAnswer>, StorageError> {
+        let answer = sqlx::query_scalar::<_, Value>(
+            "SELECT answer FROM synthesis_job_inputs
+             WHERE job_id = $1 AND agent_call_id = $2 AND status = 'answered'",
+        )
+        .bind(job_id)
+        .bind(agent_call_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        answer
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    pub async fn answer_job_input(
+        &self,
+        job_id: Uuid,
+        request: &JobAnswerRequest,
+    ) -> Result<JobResponse, StorageError> {
+        let input_id =
+            Uuid::parse_str(&request.input_id).map_err(|_| StorageError::JobInputNotFound)?;
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT i.kind, i.resume_stage
+             FROM synthesis_job_inputs i
+             JOIN synthesis_jobs j ON j.id = i.job_id
+             WHERE i.id = $1 AND i.job_id = $2 AND i.status = 'pending'
+               AND j.status = 'awaiting_input'
+             FOR UPDATE OF i, j",
+        )
+        .bind(input_id)
+        .bind(job_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StorageError::JobInputNotFound)?;
+        let kind = parse_job_input_kind(row.try_get("kind")?)?;
+        validate_job_input_answer(kind, &request.answer)?;
+        let resume_stage: String = row.try_get("resume_stage")?;
+        let answer = serde_json::to_value(&request.answer)?;
+
+        sqlx::query(
+            "UPDATE synthesis_job_inputs
+             SET status = 'answered', answer = $2, answered_at = now()
+             WHERE id = $1",
+        )
+        .bind(input_id)
+        .bind(&answer)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE synthesis_jobs
+             SET status = 'queued', stage = $2, available_at = now(),
+                 worker_id = NULL, lease_until = NULL, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(resume_stage)
+        .execute(&mut *transaction)
+        .await?;
+        append_agent_event_in_transaction(
+            &mut transaction,
+            job_id,
+            "input_answered",
+            &serde_json::json!({"input_id": input_id, "answer": answer}),
+            AGENT_TRACE_LIMIT_BYTES - AGENT_TERMINAL_EVENT_RESERVE_BYTES,
+        )
+        .await?;
+        transaction.commit().await?;
+        self.get_job(job_id).await
+    }
+
     pub async fn append_agent_event(
         &self,
         job_id: Uuid,
@@ -756,7 +925,7 @@ impl Registry {
             "SELECT ar.checkpoint
              FROM synthesis_agent_runs ar
              JOIN synthesis_jobs j ON j.id = ar.job_id
-             WHERE j.status = 'running'
+             WHERE j.status IN ('running', 'awaiting_input')
                AND ($1::uuid IS NULL OR j.id <> $1)",
         )
         .bind(excluded_job_id)
@@ -837,7 +1006,7 @@ impl Registry {
             JobStage::Contract | JobStage::Synthesizing | JobStage::Repairing => {
                 Some("synthesizing")
             }
-            JobStage::Queued | JobStage::Complete => None,
+            JobStage::Queued | JobStage::AwaitingInput | JobStage::Complete => None,
         };
         if let Some(version_status) = version_status {
             sqlx::query(
@@ -1204,6 +1373,16 @@ pub struct AgentCheckpointRecord {
 }
 
 #[derive(Clone, Debug)]
+pub struct NewJobInput {
+    pub id: Uuid,
+    pub agent_call_id: String,
+    pub kind: JobInputKind,
+    pub prompt: String,
+    pub choices: Vec<JobInputChoice>,
+    pub context: Value,
+}
+
+#[derive(Clone, Debug)]
 pub struct PublishedArtifact {
     pub digest: String,
     pub relative_path: String,
@@ -1258,6 +1437,21 @@ fn map_job(row: sqlx::postgres::PgRow) -> Result<JobResponse, StorageError> {
     };
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
+    let input_id: Option<Uuid> = row.try_get("input_id")?;
+    let pending_input = if let Some(input_id) = input_id {
+        let choices: Value = row.try_get("input_choices")?;
+        let input_created_at: DateTime<Utc> = row.try_get("input_created_at")?;
+        Some(PendingJobInput {
+            id: input_id.to_string(),
+            kind: parse_job_input_kind(row.try_get("input_kind")?)?,
+            prompt: row.try_get("input_prompt")?,
+            choices: serde_json::from_value(choices)?,
+            context: row.try_get("input_context")?,
+            created_at: input_created_at.to_rfc3339(),
+        })
+    } else {
+        None
+    };
     Ok(JobResponse {
         job_id: row.try_get::<Uuid, _>("id")?.to_string(),
         tool: row.try_get("name")?,
@@ -1266,9 +1460,35 @@ fn map_job(row: sqlx::postgres::PgRow) -> Result<JobResponse, StorageError> {
         stage: parse_job_stage(row.try_get("stage")?)?,
         version_status: parse_version_status(row.try_get("version_status")?)?,
         error,
+        pending_input,
         created_at: created_at.to_rfc3339(),
         updated_at: updated_at.to_rfc3339(),
     })
+}
+
+fn parse_job_input_kind(value: String) -> Result<JobInputKind, StorageError> {
+    JobInputKind::parse(&value)
+        .ok_or_else(|| StorageError::Invariant(format!("unknown job input kind {value:?}")))
+}
+
+fn validate_job_input_answer(
+    kind: JobInputKind,
+    answer: &JobInputAnswer,
+) -> Result<(), StorageError> {
+    match (kind, answer) {
+        (JobInputKind::Clarification, JobInputAnswer::Text { text })
+            if !text.trim().is_empty() && text.len() <= 4096 =>
+        {
+            Ok(())
+        }
+        (JobInputKind::SourceApproval, JobInputAnswer::Approve) => Ok(()),
+        (JobInputKind::SourceApproval, JobInputAnswer::Reject { reason })
+            if reason.as_ref().is_none_or(|reason| reason.len() <= 4096) =>
+        {
+            Ok(())
+        }
+        _ => Err(StorageError::InvalidJobInputAnswer),
+    }
 }
 
 fn parse_version_status(value: String) -> Result<ToolVersionStatus, StorageError> {
@@ -1308,6 +1528,12 @@ pub enum StorageError {
 
     #[error("synthesis job not found")]
     JobNotFound,
+
+    #[error("pending synthesis job input was not found")]
+    JobInputNotFound,
+
+    #[error("answer does not match the pending synthesis job input")]
+    InvalidJobInputAnswer,
 
     #[error("idempotency key was already used for a different request")]
     IdempotencyConflict,

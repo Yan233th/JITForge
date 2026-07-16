@@ -98,6 +98,7 @@ pub struct SessionResponse {
 pub enum JobStatus {
     Queued,
     Running,
+    AwaitingInput,
     Ready,
     Rejected,
 }
@@ -107,6 +108,7 @@ impl JobStatus {
         match self {
             Self::Queued => "queued",
             Self::Running => "running",
+            Self::AwaitingInput => "awaiting_input",
             Self::Ready => "ready",
             Self::Rejected => "rejected",
         }
@@ -116,6 +118,7 @@ impl JobStatus {
         match value {
             "queued" => Some(Self::Queued),
             "running" => Some(Self::Running),
+            "awaiting_input" => Some(Self::AwaitingInput),
             "ready" => Some(Self::Ready),
             "rejected" => Some(Self::Rejected),
             _ => None,
@@ -136,6 +139,7 @@ pub enum JobStage {
     Building,
     Validating,
     Repairing,
+    AwaitingInput,
     Complete,
 }
 
@@ -148,6 +152,7 @@ impl JobStage {
             Self::Building => "building",
             Self::Validating => "validating",
             Self::Repairing => "repairing",
+            Self::AwaitingInput => "awaiting_input",
             Self::Complete => "complete",
         }
     }
@@ -160,6 +165,7 @@ impl JobStage {
             "building" => Some(Self::Building),
             "validating" => Some(Self::Validating),
             "repairing" => Some(Self::Repairing),
+            "awaiting_input" => Some(Self::AwaitingInput),
             "complete" => Some(Self::Complete),
             _ => None,
         }
@@ -182,6 +188,69 @@ pub struct JobError {
     pub details: Option<Value>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobInputKind {
+    Clarification,
+    SourceApproval,
+}
+
+impl JobInputKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clarification => "clarification",
+            Self::SourceApproval => "source_approval",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "clarification" => Some(Self::Clarification),
+            "source_approval" => Some(Self::SourceApproval),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JobInputChoice {
+    pub value: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PendingJobInput {
+    pub id: String,
+    pub kind: JobInputKind,
+    pub prompt: String,
+    #[serde(default)]
+    pub choices: Vec<JobInputChoice>,
+    #[serde(default)]
+    pub context: Value,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum JobInputAnswer {
+    Text {
+        text: String,
+    },
+    Approve,
+    Reject {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct JobAnswerRequest {
+    pub input_id: String,
+    pub answer: JobInputAnswer,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct JobResponse {
     pub job_id: String,
@@ -192,6 +261,8 @@ pub struct JobResponse {
     pub version_status: ToolVersionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<JobError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_input: Option<PendingJobInput>,
     pub created_at: String,
     pub updated_at: String,
 }

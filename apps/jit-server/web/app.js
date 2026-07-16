@@ -28,7 +28,7 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN");
 }
 function statusText(value) {
-  return ({ queued: "排队中", running: "处理中", ready: "已就绪", not_ready: "未就绪", failed: "失败", rejected: "已拒绝", revoked: "已撤销", deprecated: "已弃用", draft: "草稿", contract_ready: "契约就绪", synthesizing: "合成中", building: "构建中", validating: "验证中", repairing: "修复中", complete: "完成" })[value] || value;
+  return ({ queued: "排队中", running: "处理中", awaiting_input: "等待回答", ready: "已就绪", not_ready: "未就绪", failed: "失败", rejected: "已拒绝", revoked: "已撤销", deprecated: "已弃用", draft: "草稿", contract_ready: "契约就绪", synthesizing: "合成中", building: "构建中", validating: "验证中", repairing: "修复中", complete: "完成" })[value] || value;
 }
 function showToast(message) {
   const toast = $("#toast");
@@ -336,7 +336,7 @@ function jobsTable(jobs) {
 async function renderJobs(view, offset = 0, status = "") {
   setPage("合成任务", "Synthesis Jobs");
   const select = element("select");
-  [["", "全部状态"], ["queued", "排队中"], ["running", "处理中"], ["ready", "已就绪"], ["rejected", "已拒绝"]].forEach(([value, text]) => select.append(element("option", { value, text })));
+  [["", "全部状态"], ["queued", "排队中"], ["running", "处理中"], ["awaiting_input", "等待回答"], ["ready", "已就绪"], ["rejected", "已拒绝"]].forEach(([value, text]) => select.append(element("option", { value, text })));
   select.value = status;
   select.addEventListener("change", () => { clear(view); renderJobs(view, 0, select.value); });
   const params = new URLSearchParams({ limit: "50", offset: String(offset) });
@@ -367,11 +367,55 @@ async function renderJob(view, jobId) {
   ]);
   const action = job.status === "ready" ? element("a", { className: "button primary", text: "查看工具", href: `#/tools/${encodeURIComponent(job.tool)}@${job.revision}` }) : null;
   view.append(panel(`${job.tool}@${job.revision}`, rows, action));
-  if (!["ready", "rejected"].includes(job.status)) {
+  if (job.pending_input) view.append(jobInputPanel(job));
+  if (!["ready", "rejected", "awaiting_input"].includes(job.status)) {
     state.pollTimer = window.setTimeout(() => {
       if (location.hash === `#/jobs/${jobId}`) route();
     }, 1000);
   }
+}
+
+function jobInputPanel(job) {
+  const input = job.pending_input;
+  const body = element("div", { className: "stack" }, [
+    element("p", { text: input.prompt })
+  ]);
+  if (input.context && Object.keys(input.context).length) body.append(codeBlock(JSON.stringify(input.context, null, 2)));
+  if (input.kind === "source_approval") {
+    const actions = element("div", { className: "form-actions" });
+    const approve = element("button", { className: "primary", text: "批准此数据源", type: "button" });
+    const reject = element("button", { className: "danger", text: "拒绝", type: "button" });
+    approve.addEventListener("click", () => answerJobInput(job, { type: "approve" }));
+    reject.addEventListener("click", () => answerJobInput(job, { type: "reject" }));
+    actions.append(approve, reject); body.append(actions);
+  } else {
+    const form = element("form", { className: "stack" });
+    const answer = element("textarea", { placeholder: "输入给合成 Agent 的回答", required: true });
+    if (input.choices?.length) {
+      const choices = element("div", { className: "form-actions" });
+      input.choices.forEach((choice) => {
+        const button = element("button", { className: "ghost", text: choice.label, type: "button" });
+        button.title = choice.description || "";
+        button.addEventListener("click", () => { answer.value = choice.value; answer.focus(); });
+        choices.append(button);
+      });
+      form.append(choices);
+    }
+    form.append(answer, element("div", { className: "form-actions" }, element("button", { className: "primary", text: "提交回答", type: "submit" })));
+    form.addEventListener("submit", (event) => { event.preventDefault(); answerJobInput(job, { type: "text", text: answer.value.trim() }); });
+    body.append(form);
+  }
+  return panel("等待你的回答", body);
+}
+
+async function answerJobInput(job, answer) {
+  try {
+    await api(`/v1/jobs/${encodeURIComponent(job.job_id)}`, {
+      method: "POST",
+      body: JSON.stringify({ input_id: job.pending_input.id, answer })
+    });
+    showToast("回答已提交，合成任务继续运行"); route();
+  } catch (error) { showToast(error.message); }
 }
 
 function definitionList(entries) {

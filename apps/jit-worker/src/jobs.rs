@@ -2,8 +2,8 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use jit_artifact::{ArtifactStore, StoredArtifact, ToolContract, ToolTestCase, ValidationSummary};
-use jit_protocol::{IoFormat, JobStage};
-use jit_storage::{ClaimedSynthesisJob, PublishedArtifact, Registry, StorageError};
+use jit_protocol::{IoFormat, JobInputAnswer, JobInputChoice, JobInputKind, JobStage};
+use jit_storage::{ClaimedSynthesisJob, NewJobInput, PublishedArtifact, Registry, StorageError};
 use rig_core::{
     OneOrMany,
     agent::{AgentRun, AgentRunStep, InvalidToolCallHookAction, ModelTurnOutcome, PendingToolCall},
@@ -106,6 +106,10 @@ impl JobProcessor {
                 }
             }
         };
+        if matches!(result, Err(JobError::AwaitingInput)) {
+            info!(job_id = %job.job_id, "synthesis job is awaiting user input");
+            return;
+        }
         if let Err(error) = result {
             warn!(job_id = %job.job_id, %error, "synthesis job rejected");
             if let Err(reject_error) = self
@@ -144,6 +148,9 @@ impl JobProcessor {
         .await?;
 
         let result = self.drive_agent(job, &mut run, &mut workspace).await;
+        if matches!(result, Err(JobError::AwaitingInput)) {
+            return Err(JobError::AwaitingInput);
+        }
         let published = result.as_ref().ok().cloned();
         if let Err(error) = self
             .cleanup_candidates(job.job_id, &workspace, published.as_deref())
@@ -542,6 +549,41 @@ impl JobProcessor {
                 validate_reason(&args.reason)?;
                 Err(JobError::AgentAborted(args.reason))
             }
+            "request_clarification" => {
+                let args: RequestClarificationArgs = parse_args(arguments)?;
+                validate_reason(&args.reason)?;
+                validate_clarification(&args)?;
+                if let Some(answer) = self
+                    .registry
+                    .answered_job_input(job.job_id, &call.tool_call.id)
+                    .await?
+                {
+                    return match answer {
+                        JobInputAnswer::Text { text } => Ok(ToolExecution::Continue(json!({
+                            "ok": true,
+                            "answer": text
+                        }))),
+                        _ => Err(invalid_action(
+                            "clarification resumed with a non-text answer",
+                        )),
+                    };
+                }
+                self.registry
+                    .suspend_job_for_input(
+                        job.job_id,
+                        &self.worker_id,
+                        &NewJobInput {
+                            id: uuid::Uuid::now_v7(),
+                            agent_call_id: call.tool_call.id.clone(),
+                            kind: JobInputKind::Clarification,
+                            prompt: args.question,
+                            choices: args.choices,
+                            context: json!({}),
+                        },
+                    )
+                    .await?;
+                Err(JobError::AwaitingInput)
+            }
             other => Err(invalid_action(format!("unknown tool {other:?}"))),
         }
     }
@@ -817,6 +859,14 @@ struct AbortArgs {
     reason: String,
 }
 
+#[derive(Deserialize)]
+struct RequestClarificationArgs {
+    question: String,
+    #[serde(default)]
+    choices: Vec<JobInputChoice>,
+    reason: String,
+}
+
 fn load_or_create_run(
     job: &ClaimedSynthesisJob,
 ) -> Result<(AgentRun, AgentWorkspace, bool), JobError> {
@@ -860,7 +910,7 @@ fn fixture_context(job: &ClaimedSynthesisJob, workspace: &AgentWorkspace) -> Fix
 
 fn available_tools(workspace: &mut AgentWorkspace) -> Vec<ToolDefinition> {
     workspace.metrics.turns = workspace.metrics.turns.saturating_add(1);
-    let mut tools = vec![abort_tool()];
+    let mut tools = vec![abort_tool(), request_clarification_tool()];
     if workspace.draft.is_none() {
         tools.push(submit_contract_tool());
     } else if workspace.source.is_none() {
@@ -981,6 +1031,56 @@ fn abort_tool() -> ToolDefinition {
         description: "Stop when the requirement is contradictory or unsupported.".to_owned(),
         parameters: object_schema(json!({"reason": {"type": "string"}}), &["reason"]),
     }
+}
+
+fn request_clarification_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "request_clarification".to_owned(),
+        description: "Pause and ask the user one necessary question instead of guessing."
+            .to_owned(),
+        parameters: object_schema(
+            json!({
+                "question": {"type": "string"},
+                "choices": {
+                    "type": "array",
+                    "maxItems": 3,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string"},
+                            "label": {"type": "string"},
+                            "description": {"type": "string"}
+                        },
+                        "required": ["value", "label"],
+                        "additionalProperties": false
+                    }
+                },
+                "reason": {"type": "string"}
+            }),
+            &["question", "choices", "reason"],
+        ),
+    }
+}
+
+fn validate_clarification(args: &RequestClarificationArgs) -> Result<(), JobError> {
+    if args.question.trim().is_empty() || args.question.len() > 4096 || args.choices.len() > 3 {
+        return Err(invalid_action(
+            "clarification question must contain 1-4096 bytes and at most three choices",
+        ));
+    }
+    if args.choices.iter().any(|choice| {
+        choice.value.trim().is_empty()
+            || choice.value.len() > 512
+            || choice.label.trim().is_empty()
+            || choice.label.len() > 512
+            || choice
+                .description
+                .as_ref()
+                .is_some_and(|description| description.len() > 1024)
+    }) {
+        return Err(invalid_action("clarification choices are invalid"));
+    }
+    Ok(())
 }
 
 fn object_schema(properties: Value, required: &[&str]) -> Value {
@@ -1321,6 +1421,9 @@ fn truncate_text(value: &str) -> String {
 
 #[derive(Debug, Error)]
 enum JobError {
+    #[error("synthesis job is awaiting user input")]
+    AwaitingInput,
+
     #[error("worker retry limit exceeded")]
     AttemptsExhausted,
 
@@ -1358,6 +1461,7 @@ enum JobError {
 impl JobError {
     fn code(&self) -> &'static str {
         match self {
+            Self::AwaitingInput => "awaiting_input",
             Self::AttemptsExhausted => "attempts_exhausted",
             Self::AgentAborted(_) => "agent_aborted",
             Self::AgentLimit(_) => "agent_limit_reached",
@@ -1384,6 +1488,7 @@ impl JobError {
                 "engine": engine,
                 "version": version
             })),
+            Self::AwaitingInput => None,
             _ => None,
         }
     }

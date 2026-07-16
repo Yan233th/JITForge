@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    io::{self, IsTerminal, Read, Write},
+    fs::{self, OpenOptions},
+    io::{self, BufRead, BufReader, IsTerminal, Read, Write},
     path::PathBuf,
     process,
     time::Duration,
@@ -10,9 +10,10 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use clap::{Args, Parser, Subcommand};
 use jit_config::JitForgeConfig;
 use jit_protocol::{
-    ErrorResponse, InvocationRequest, InvocationResponse, IoFormat, JobResponse, JobStatus,
-    MAX_INPUT_SAMPLE_BYTES, RegistrationRequest, RegistrationResponse, RevokeRequest,
-    RevokeResponse, ToolExample, ToolListResponse, ToolSummaryResponse,
+    ErrorResponse, InvocationRequest, InvocationResponse, IoFormat, JobAnswerRequest,
+    JobInputAnswer, JobInputKind, JobResponse, JobStatus, MAX_INPUT_SAMPLE_BYTES,
+    RegistrationRequest, RegistrationResponse, RevokeRequest, RevokeResponse, ToolExample,
+    ToolListResponse, ToolSummaryResponse,
 };
 use reqwest::{RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -91,6 +92,23 @@ enum Command {
 
     /// Show a synthesis job without changing it.
     Status { job_id: String },
+
+    /// Answer a clarification or approve a source for a suspended synthesis job.
+    Answer {
+        job_id: String,
+
+        #[arg(value_name = "TEXT", conflicts_with_all = ["approve", "reject"])]
+        answer: Option<String>,
+
+        #[arg(long, conflicts_with_all = ["answer", "reject"])]
+        approve: bool,
+
+        #[arg(long, conflicts_with_all = ["answer", "approve"])]
+        reject: bool,
+
+        #[arg(long, requires = "reject")]
+        reason: Option<String>,
+    },
 
     /// List callable tools, optionally filtering by name or description.
     #[command(visible_alias = "ls")]
@@ -269,6 +287,16 @@ async fn run(cli: &Cli) -> CliResult<i32> {
                     Ok(0)
                 }
                 JobStatus::Rejected => Err(CliFailure::job_rejected(&job)),
+                JobStatus::AwaitingInput => {
+                    if !cli.json {
+                        println!("{}", job.job_id);
+                        if let Some(input) = &job.pending_input {
+                            eprintln!("jit: awaiting input: {}", input.prompt);
+                            eprintln!("jit: answer with `jit answer {} ...`", job.job_id);
+                        }
+                    }
+                    Ok(75)
+                }
                 _ => Err(CliFailure::internal(
                     "job polling ended before a terminal state".to_owned(),
                 )),
@@ -356,6 +384,53 @@ async fn run(cli: &Cli) -> CliResult<i32> {
                 if let Some(error) = job.error {
                     eprintln!("jit: {}: {}", error.code, error.message);
                 }
+                if let Some(input) = job.pending_input {
+                    eprintln!("jit: awaiting input: {}", input.prompt);
+                }
+            }
+            Ok(0)
+        }
+        Command::Answer {
+            job_id,
+            answer,
+            approve,
+            reject,
+            reason,
+        } => {
+            let job = fetch_job(&client, server, token, job_id).await?;
+            let pending = job.pending_input.as_ref().ok_or_else(|| {
+                CliFailure::local(65, "job_input_not_pending", "job has no pending input")
+            })?;
+            let answer = match (answer, approve, reject) {
+                (Some(text), false, false) => JobInputAnswer::Text { text: text.clone() },
+                (None, true, false) => JobInputAnswer::Approve,
+                (None, false, true) => JobInputAnswer::Reject {
+                    reason: reason.clone(),
+                },
+                _ => {
+                    return Err(CliFailure::local(
+                        64,
+                        "answer_required",
+                        "provide TEXT, --approve, or --reject",
+                    ));
+                }
+            };
+            let answered = submit_job_answer(
+                &client,
+                server,
+                token,
+                job_id,
+                JobAnswerRequest {
+                    input_id: pending.id.clone(),
+                    answer,
+                },
+            )
+            .await?;
+            if cli.json {
+                print_json(&answered)?;
+            } else {
+                println!("{}", answered.job_id);
+                eprintln!("jit: answer accepted; synthesis re-queued");
             }
             Ok(0)
         }
@@ -489,6 +564,14 @@ async fn wait_for_job(
         if job.status.is_terminal() {
             return Ok(job);
         }
+        if job.status == JobStatus::AwaitingInput {
+            if show_progress && let Some(request) = prompt_for_job_input(&job)? {
+                submit_job_answer(client, server, token, job_id, request).await?;
+                previous_stage = None;
+                continue;
+            }
+            return Ok(job);
+        }
         if Instant::now() >= deadline {
             return Err(CliFailure::local(
                 124,
@@ -498,6 +581,98 @@ async fn wait_for_job(
         }
         sleep(Duration::from_millis(500)).await;
     }
+}
+
+async fn submit_job_answer(
+    client: &reqwest::Client,
+    server: &str,
+    token: &str,
+    job_id: &str,
+    request: JobAnswerRequest,
+) -> CliResult<JobResponse> {
+    let response = authenticated(
+        client
+            .post(format!("{server}/v1/jobs/{job_id}"))
+            .json(&request),
+        token,
+    )
+    .send()
+    .await
+    .map_err(CliFailure::transport)?;
+    decode_response(response).await
+}
+
+fn prompt_for_job_input(job: &JobResponse) -> CliResult<Option<JobAnswerRequest>> {
+    let Some(pending) = &job.pending_input else {
+        return Err(CliFailure::internal(
+            "awaiting_input job omitted pending_input".to_owned(),
+        ));
+    };
+    let mut tty = match OpenOptions::new().read(true).write(true).open("/dev/tty") {
+        Ok(tty) => tty,
+        Err(_) => return Ok(None),
+    };
+    let reader_file = tty.try_clone().map_err(CliFailure::io)?;
+    let mut reader = BufReader::new(reader_file);
+    writeln!(tty, "\njit: {}", pending.prompt).map_err(CliFailure::io)?;
+    let show_context = match &pending.context {
+        serde_json::Value::Null => false,
+        serde_json::Value::Object(object) => !object.is_empty(),
+        _ => true,
+    };
+    if show_context {
+        let context = serde_json::to_string_pretty(&pending.context)
+            .map_err(|error| CliFailure::internal(error.to_string()))?;
+        writeln!(tty, "{context}").map_err(CliFailure::io)?;
+    }
+    for (index, choice) in pending.choices.iter().enumerate() {
+        write!(tty, "  {}. {}", index + 1, choice.label).map_err(CliFailure::io)?;
+        if let Some(description) = &choice.description {
+            write!(tty, " — {description}").map_err(CliFailure::io)?;
+        }
+        writeln!(tty).map_err(CliFailure::io)?;
+    }
+
+    let answer = match pending.kind {
+        JobInputKind::SourceApproval => loop {
+            write!(tty, "Approve this source? [y/N] ").map_err(CliFailure::io)?;
+            tty.flush().map_err(CliFailure::io)?;
+            let mut line = String::new();
+            if reader.read_line(&mut line).map_err(CliFailure::io)? == 0 {
+                return Ok(None);
+            }
+            match line.trim().to_ascii_lowercase().as_str() {
+                "y" | "yes" => break JobInputAnswer::Approve,
+                "" | "n" | "no" => break JobInputAnswer::Reject { reason: None },
+                _ => writeln!(tty, "Please answer y or n.").map_err(CliFailure::io)?,
+            }
+        },
+        JobInputKind::Clarification => loop {
+            write!(tty, "Answer: ").map_err(CliFailure::io)?;
+            tty.flush().map_err(CliFailure::io)?;
+            let mut line = String::new();
+            if reader.read_line(&mut line).map_err(CliFailure::io)? == 0 {
+                return Ok(None);
+            }
+            let raw = line.trim();
+            if raw.is_empty() {
+                writeln!(tty, "Answer must not be empty.").map_err(CliFailure::io)?;
+                continue;
+            }
+            let text = raw
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|index| pending.choices.get(index))
+                .map(|choice| choice.value.clone())
+                .unwrap_or_else(|| raw.to_owned());
+            break JobInputAnswer::Text { text };
+        },
+    };
+    Ok(Some(JobAnswerRequest {
+        input_id: pending.id.clone(),
+        answer,
+    }))
 }
 
 async fn fetch_job(

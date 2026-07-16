@@ -17,9 +17,9 @@ use jit_artifact::{ArtifactError, ArtifactStore};
 use jit_config::{JitForgeConfig, nonempty_env};
 use jit_domain::{ToolIntent, ToolName};
 use jit_protocol::{
-    ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, JobStatus,
-    MAX_INPUT_SAMPLE_BYTES, MAX_INPUT_SAMPLES, MAX_INPUT_SAMPLES_TOTAL_BYTES, ReadyResponse,
-    RegistrationRequest, RevokeRequest, ToolArtifactManifest, ToolArtifactResponse,
+    ErrorResponse, HealthResponse, InvocationRequest, InvocationResponse, JobAnswerRequest,
+    JobStatus, MAX_INPUT_SAMPLE_BYTES, MAX_INPUT_SAMPLES, MAX_INPUT_SAMPLES_TOTAL_BYTES,
+    ReadyResponse, RegistrationRequest, RevokeRequest, ToolArtifactManifest, ToolArtifactResponse,
     ToolArtifactTestCase,
     worker::{ExecuteRequest, runner_client::RunnerClient},
 };
@@ -148,7 +148,7 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/v1/tools/{name}/invocations", post(invoke_tool))
         .route("/v1/jobs", get(list_jobs))
-        .route("/v1/jobs/{job_id}", get(get_job))
+        .route("/v1/jobs/{job_id}", get(get_job).post(answer_job_input))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let request_id_header = HeaderName::from_static("x-request-id");
@@ -297,6 +297,21 @@ async fn get_job(
     let response = state
         .registry
         .get_job(job_id)
+        .await
+        .map_err(ApiError::from_storage)?;
+    Ok(Json(response))
+}
+
+async fn answer_job_input(
+    State(state): State<AppState>,
+    Path(raw_job_id): Path<String>,
+    Json(request): Json<JobAnswerRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let job_id =
+        Uuid::parse_str(&raw_job_id).map_err(|_| ApiError::bad_request("job ID must be a UUID"))?;
+    let response = state
+        .registry
+        .answer_job_input(job_id, &request)
         .await
         .map_err(ApiError::from_storage)?;
     Ok(Json(response))
@@ -698,6 +713,16 @@ impl ApiError {
                 StatusCode::NOT_FOUND,
                 "job_not_found",
                 "synthesis job not found",
+            ),
+            StorageError::JobInputNotFound => Self::new(
+                StatusCode::CONFLICT,
+                "job_input_not_pending",
+                "the synthesis job no longer has that pending input",
+            ),
+            StorageError::InvalidJobInputAnswer => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_job_answer",
+                "the answer does not match the pending input",
             ),
             StorageError::IdempotencyConflict => Self::new(
                 StatusCode::CONFLICT,
