@@ -43,6 +43,8 @@ use uuid::Uuid;
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8080";
 const DEFAULT_DATABASE_URL: &str = "postgres://jitforge:jitforge@127.0.0.1:5432/jitforge";
 const IDEMPOTENCY_KEY_HEADER: &str = "idempotency-key";
+const DEFAULT_EXECUTION_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_HTTP_EXECUTION_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Clone)]
 struct AppState {
@@ -547,8 +549,10 @@ async fn invoke_tool(
     if request.args.len() > 128 || request.args.iter().any(|argument| argument.len() > 4096) {
         return Err(ApiError::bad_request("tool arguments exceed their limit"));
     }
-    let timeout_ms = request.timeout_ms.unwrap_or(5_000);
-    if !(1..=30_000).contains(&timeout_ms) {
+    if request
+        .timeout_ms
+        .is_some_and(|timeout_ms| !(1..=30_000).contains(&timeout_ms))
+    {
         return Err(ApiError::bad_request(
             "timeout_ms must be between 1 and 30000",
         ));
@@ -569,6 +573,21 @@ async fn invoke_tool(
         .resolve_tool(&name, request.revision)
         .await
         .map_err(ApiError::from_storage)?;
+    let timeout_ms = if let Some(timeout_ms) = request.timeout_ms {
+        timeout_ms
+    } else {
+        let store = state.artifact_store.clone();
+        let digest = resolved.artifact_digest.clone();
+        let artifact = tokio::task::spawn_blocking(move || store.load(&digest))
+            .await
+            .map_err(|error| ApiError::internal(format!("artifact task failed: {error}")))?
+            .map_err(ApiError::from_artifact)?;
+        if artifact.bundle.manifest.http_capabilities.is_empty() {
+            DEFAULT_EXECUTION_TIMEOUT_MS
+        } else {
+            DEFAULT_HTTP_EXECUTION_TIMEOUT_MS
+        }
+    };
     let media_type = request
         .content_type
         .split(';')

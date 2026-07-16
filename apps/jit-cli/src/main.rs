@@ -83,8 +83,8 @@ enum Command {
         #[arg(long, default_value = "text/plain")]
         content_type: String,
 
-        #[arg(long, default_value = "5s", value_parser = parse_duration)]
-        timeout: Duration,
+        #[arg(long, value_parser = parse_duration)]
+        timeout: Option<Duration>,
 
         #[arg(last = true, value_name = "TOOL_ARGS")]
         args: Vec<String>,
@@ -328,7 +328,9 @@ async fn run(cli: &Cli) -> CliResult<i32> {
             timeout,
             args,
         } => {
-            if *timeout > Duration::from_secs(30) || timeout.is_zero() {
+            if let Some(timeout) = timeout
+                && (*timeout > Duration::from_secs(30) || timeout.is_zero())
+            {
                 return Err(CliFailure::local(
                     64,
                     "invalid_timeout",
@@ -349,7 +351,7 @@ async fn run(cli: &Cli) -> CliResult<i32> {
                 args: args.clone(),
                 content_type: content_type.clone(),
                 stdin_base64: BASE64.encode(stdin),
-                timeout_ms: Some(timeout.as_millis() as u64),
+                timeout_ms: timeout.map(|timeout| timeout.as_millis() as u64),
             };
             let response = authenticated(
                 client

@@ -37,6 +37,7 @@ struct Config {
     llm: LlmSettings,
     search: SearchSettings,
     http_mode: String,
+    http_proxy_url: Option<String>,
 }
 
 #[derive(Debug)]
@@ -70,6 +71,7 @@ async fn main() -> Result<()> {
             &config.search.provider,
             &config.search.base_url,
             &config.search.engines,
+            config.http_proxy_url.as_deref(),
         )
         .context("failed to configure synthesis web access")?,
     );
@@ -79,6 +81,7 @@ async fn main() -> Result<()> {
             registry.clone(),
             &config.docker_runtime,
             &config.http_mode,
+            config.http_proxy_url.as_deref(),
         )
         .context("failed to configure runner HTTP mode")?,
     );
@@ -225,6 +228,7 @@ impl Config {
             },
             http_mode: configured("JITFORGE_HTTP_MODE", config.http.mode)
                 .unwrap_or_else(|| "disabled".to_owned()),
+            http_proxy_url: configured("JITFORGE_HTTP_PROXY_URL", config.http.proxy_url),
         })
     }
 }

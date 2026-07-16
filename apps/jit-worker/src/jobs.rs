@@ -733,6 +733,25 @@ impl JobProcessor {
                     "capability": capability
                 })))
             }
+            "release_http_capability" => {
+                let args: ReleaseHttpCapabilityArgs = parse_args(arguments)?;
+                validate_reason(&args.reason)?;
+                let index = workspace
+                    .http_capabilities
+                    .iter()
+                    .position(|approved| approved.hash == args.capability_hash)
+                    .ok_or_else(|| invalid_action("HTTP capability is not active in this task"))?;
+                let released = workspace.http_capabilities.remove(index);
+                workspace
+                    .http_probe_records
+                    .retain(|probe| probe.capability_hash != released.hash);
+                Ok(ToolExecution::Continue(json!({
+                    "ok": true,
+                    "released": true,
+                    "capability_hash": released.hash,
+                    "capability": released.capability
+                })))
+            }
             "probe_http" => {
                 let args: ProbeHttpArgs = parse_args(arguments)?;
                 validate_reason(&args.reason)?;
@@ -1111,6 +1130,12 @@ struct RequestHttpCapabilityArgs {
 }
 
 #[derive(Deserialize)]
+struct ReleaseHttpCapabilityArgs {
+    capability_hash: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
 struct ProbeHttpArgs {
     url: String,
     reason: String,
@@ -1169,8 +1194,11 @@ fn available_tools(workspace: &mut AgentWorkspace) -> Vec<ToolDefinition> {
     if workspace.http_capabilities.len() < MAX_HTTP_CAPABILITIES {
         tools.push(request_http_capability_tool());
     }
-    if !workspace.http_capabilities.is_empty() && workspace.metrics.http_probes < MAX_HTTP_PROBES {
-        tools.push(probe_http_tool());
+    if !workspace.http_capabilities.is_empty() {
+        tools.push(release_http_capability_tool());
+        if workspace.metrics.http_probes < MAX_HTTP_PROBES {
+            tools.push(probe_http_tool());
+        }
     }
     if workspace.draft.is_none() {
         tools.push(submit_contract_tool());
@@ -1385,6 +1413,20 @@ fn request_http_capability_tool() -> ToolDefinition {
                 "reason": {"type": "string"}
             }),
             &["host", "path_prefix", "query_keys", "purpose", "reason"],
+        ),
+    }
+}
+
+fn release_http_capability_tool() -> ToolDefinition {
+    ToolDefinition {
+        name: "release_http_capability".to_owned(),
+        description: "Remove an approved but failed or unused HTTP capability from this task before the artifact is created.".to_owned(),
+        parameters: object_schema(
+            json!({
+                "capability_hash": {"type": "string"},
+                "reason": {"type": "string"}
+            }),
+            &["capability_hash", "reason"],
         ),
     }
 }

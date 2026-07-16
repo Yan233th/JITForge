@@ -7,7 +7,7 @@ use thiserror::Error;
 use tokio::net::lookup_host;
 
 const SEARCH_RESPONSE_LIMIT: usize = 512 * 1024;
-const DOCUMENT_RESPONSE_LIMIT: usize = 256 * 1024;
+const DOCUMENT_RESPONSE_LIMIT: usize = 1024 * 1024;
 const PROBE_RESPONSE_LIMIT: usize = 1024 * 1024;
 const MAX_REDIRECTS: usize = 3;
 
@@ -16,6 +16,7 @@ pub struct WebAccess {
     search_base_url: Url,
     search_client: reqwest::Client,
     search_engines: String,
+    public_proxy: Option<reqwest::Proxy>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -56,7 +57,12 @@ struct SearxResult {
 }
 
 impl WebAccess {
-    pub fn new(provider: &str, base_url: &str, engines: &str) -> Result<Self, WebAccessError> {
+    pub fn new(
+        provider: &str,
+        base_url: &str,
+        engines: &str,
+        proxy_url: Option<&str>,
+    ) -> Result<Self, WebAccessError> {
         if provider != "searxng" {
             return Err(WebAccessError::InvalidConfig(format!(
                 "unsupported search provider {provider:?}; expected searxng"
@@ -79,10 +85,16 @@ impl WebAccess {
             .user_agent("JITForge/0.1 search")
             .build()
             .map_err(|error| WebAccessError::InvalidConfig(error.to_string()))?;
+        let public_proxy = proxy_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(validate_proxy)
+            .transpose()?;
         Ok(Self {
             search_base_url,
             search_client,
             search_engines: engines.trim().to_owned(),
+            public_proxy,
         })
     }
 
@@ -182,12 +194,15 @@ impl WebAccess {
                 ));
             }
             let pinned = *addresses.iter().next().expect("non-empty checked above");
-            let client = reqwest::Client::builder()
+            let mut client = reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(10))
                 .resolve(host, pinned)
-                .user_agent("JITForge/0.1 synthesis-probe")
-                .build()?;
+                .user_agent("JITForge/0.1 synthesis-probe");
+            if let Some(proxy) = &self.public_proxy {
+                client = client.proxy(proxy.clone());
+            }
+            let client = client.build()?;
             let response = client
                 .get(url.clone())
                 .header(
@@ -231,6 +246,27 @@ impl WebAccess {
         }
         Err(WebAccessError::RedirectLimit)
     }
+}
+
+fn validate_proxy(raw_url: &str) -> Result<reqwest::Proxy, WebAccessError> {
+    let url = Url::parse(raw_url).map_err(|error| {
+        WebAccessError::InvalidConfig(format!("invalid HTTP proxy URL: {error}"))
+    })?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(WebAccessError::InvalidConfig(
+            "http.proxy_url must be an HTTP(S) origin without credentials, path, query, or fragment"
+                .to_owned(),
+        ));
+    }
+    reqwest::Proxy::all(url.as_str())
+        .map_err(|error| WebAccessError::InvalidConfig(format!("invalid HTTP proxy URL: {error}")))
 }
 
 fn capability_allows(capability: &HttpCapability, url: &Url) -> bool {

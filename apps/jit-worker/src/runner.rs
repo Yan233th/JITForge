@@ -9,6 +9,7 @@ use tokio::{
     time::{Instant, timeout},
 };
 use tracing::{info, warn};
+use url::Url;
 use uuid::Uuid;
 
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
@@ -35,6 +36,7 @@ pub struct DockerRunner {
     runtime: String,
     docker_binary: String,
     http_mode: HttpMode,
+    http_proxy_url: Option<String>,
     registry: Registry,
 }
 
@@ -58,18 +60,21 @@ impl DockerRunner {
         registry: Registry,
         runtime: impl Into<String>,
         http_mode: &str,
+        http_proxy_url: Option<&str>,
     ) -> Result<Self, RunnerError> {
         let http_mode = match http_mode.trim() {
             "disabled" => HttpMode::Disabled,
             "direct" => HttpMode::Direct,
             other => return Err(RunnerError::InvalidHttpMode(other.to_owned())),
         };
+        let http_proxy_url = normalize_proxy_url(http_proxy_url)?;
         Ok(Self {
             store,
             registry,
             runtime: runtime.into(),
             docker_binary: "docker".to_owned(),
             http_mode,
+            http_proxy_url,
         })
     }
 
@@ -302,6 +307,16 @@ impl DockerRunner {
                 .arg("--env")
                 .arg(format!("JITFORGE_HTTP_FIXTURES={fixtures}"));
         }
+        if fixtures.is_none()
+            && has_http
+            && let Some(proxy_url) = &self.http_proxy_url
+        {
+            command
+                .arg("--env")
+                .arg(format!("HTTPS_PROXY={proxy_url}"))
+                .arg("--env")
+                .arg(format!("https_proxy={proxy_url}"));
+        }
         command
             .arg(&image)
             .args(args)
@@ -383,6 +398,28 @@ impl DockerRunner {
     }
 }
 
+fn normalize_proxy_url(proxy_url: Option<&str>) -> Result<Option<String>, RunnerError> {
+    let Some(raw_url) = proxy_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let url =
+        Url::parse(raw_url).map_err(|error| RunnerError::InvalidHttpProxy(error.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(RunnerError::InvalidHttpProxy(
+            "proxy URL must be an HTTP(S) origin without credentials, path, query, or fragment"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(url.to_string()))
+}
+
 fn normalize_label(output: &[u8]) -> &str {
     std::str::from_utf8(output).unwrap_or_default().trim()
 }
@@ -433,6 +470,9 @@ pub enum RunnerError {
 
     #[error("unsupported runner HTTP mode {0:?}")]
     InvalidHttpMode(String),
+
+    #[error("invalid runner HTTP proxy: {0}")]
+    InvalidHttpProxy(String),
 
     #[error("artifact requires live HTTP, but runner HTTP mode is disabled")]
     HttpDisabled,

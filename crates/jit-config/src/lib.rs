@@ -76,6 +76,7 @@ pub struct SearchConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
     pub mode: Option<String>,
+    pub proxy_url: Option<String>,
 }
 
 impl JitForgeConfig {
@@ -209,6 +210,7 @@ mod tests {
 
             [http]
             mode = "direct"
+            proxy_url = "http://proxy.internal:8080"
             "#,
         )
         .unwrap();
@@ -221,6 +223,10 @@ mod tests {
         assert_eq!(config.llm.protocol.as_deref(), Some("chat_completions"));
         assert_eq!(config.search.provider.as_deref(), Some("searxng"));
         assert_eq!(config.http.mode.as_deref(), Some("direct"));
+        assert_eq!(
+            config.http.proxy_url.as_deref(),
+            Some("http://proxy.internal:8080")
+        );
         assert_eq!(
             config.server.artifact_dir.as_deref(),
             Some(".data/artifacts")
