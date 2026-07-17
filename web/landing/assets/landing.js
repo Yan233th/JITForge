@@ -32,7 +32,7 @@ copyCommand.addEventListener("click", async () => {
 
 function showCopyResult(label) {
   copyCommand.textContent = label;
-  window.setTimeout(() => { copyCommand.textContent = "Copy"; }, 1600);
+  window.setTimeout(() => { copyCommand.textContent = "Copy command"; }, 1600);
 }
 
 async function probe(row) {

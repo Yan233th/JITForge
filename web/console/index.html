@@ -3,49 +3,80 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="JITForge Registry 与合成控制台">
   <title>JITForge Console</title>
   <link rel="stylesheet" href="/ui/app.css">
 </head>
 <body>
   <section id="login-view" class="login-layout">
-    <div class="login-card">
-      <a class="brand-mark" href="/" aria-label="返回 JITForge 首页">JF</a>
-      <p class="eyebrow">即时工具，集中管理</p>
-      <h1>Forge tools<br>on demand.</h1>
-      <p class="login-meta">JITFORGE CONSOLE / LOCAL CONTROL PLANE</p>
-      <p class="muted">使用配置中的共享访问令牌登录。令牌只用于本次登录，不会保存在浏览器存储中。</p>
-      <form id="login-form" class="stack">
-        <label>访问令牌<input id="login-token" type="password" autocomplete="current-password" required></label>
-        <button type="submit" class="primary">登录</button>
-      </form>
-      <p id="login-error" class="error" role="alert"></p>
+    <header class="login-header">
+      <a class="brand" href="/" aria-label="返回 JITForge 首页">
+        <span class="brand-mark" aria-hidden="true">JF</span>
+        <span>JITForge</span>
+      </a>
+      <span>CONTROL PLANE / BROWSER SESSION</span>
+    </header>
+
+    <div class="login-grid">
+      <section class="login-context" aria-labelledby="login-title">
+        <p class="record-code">AUTH RECORD / SESSION REQUEST</p>
+        <h1 id="login-title">Open a protected control-plane session.</h1>
+        <p class="login-lede">令牌只用于创建本次浏览器 Session，不写入 localStorage 或 sessionStorage。后续写请求由同源 Cookie 与 CSRF token 共同保护。</p>
+        <dl class="session-facts">
+          <div><dt>SESSION PATH</dt><dd>/v1/session</dd></div>
+          <div><dt>COOKIE</dt><dd>HttpOnly · SameSite=Strict</dd></div>
+          <div><dt>LIFETIME</dt><dd>12 hours</dd></div>
+          <div><dt>WRITE GUARD</dt><dd>X-JitForge-Csrf</dd></div>
+        </dl>
+      </section>
+
+      <section class="login-form-panel" aria-label="登录表单">
+        <div class="form-panel-heading">
+          <span>ACCESS TOKEN</span>
+          <span>REQUIRED</span>
+        </div>
+        <form id="login-form" class="stack">
+          <label for="login-token">共享访问令牌</label>
+          <input id="login-token" type="password" autocomplete="current-password" required>
+          <button type="submit" class="primary">创建 Session</button>
+        </form>
+        <p id="login-error" class="error" role="alert"></p>
+        <a class="back-link" href="/">← 返回 Public Gateway</a>
+      </section>
     </div>
   </section>
 
   <div id="app-shell" class="app-shell hidden">
     <aside class="sidebar">
-      <a class="brand" href="/"><span class="brand-mark small">JF</span><span>JITForge</span></a>
-      <nav>
-        <a href="#/tools" data-nav="tools">工具</a>
-        <a href="#/jobs" data-nav="jobs">合成任务</a>
-        <a href="#/access" data-nav="access">外部访问</a>
-        <a href="#/status" data-nav="status">系统状态</a>
+      <a class="brand" href="/" aria-label="返回 JITForge 首页">
+        <span class="brand-mark small" aria-hidden="true">JF</span>
+        <span>JITForge</span>
+      </a>
+      <p class="nav-label">CONTROL INDEX</p>
+      <nav aria-label="主导航">
+        <a href="#/tools" data-nav="tools"><span>01</span><strong>能力</strong><small>Registry</small></a>
+        <a href="#/jobs" data-nav="jobs"><span>02</span><strong>合成任务</strong><small>AgentRun</small></a>
+        <a href="#/access" data-nav="access"><span>03</span><strong>外部访问</strong><small>Capability</small></a>
+        <a href="#/status" data-nav="status"><span>04</span><strong>系统状态</strong><small>Readiness</small></a>
       </nav>
       <div class="sidebar-footer">
+        <p id="session-expiry">SESSION ACTIVE</p>
         <button id="logout-button" class="ghost">退出登录</button>
       </div>
     </aside>
+
     <main>
       <header class="topbar">
         <div class="page-heading">
-          <p id="page-label" class="page-label">工具</p>
+          <p id="page-label" class="page-label">能力</p>
           <h1 id="page-title">Capabilities</h1>
         </div>
-        <a id="page-action" href="#/register" class="button primary hidden">注册新工具</a>
+        <a id="page-action" href="#/register" class="button primary hidden">注册新能力</a>
       </header>
       <section id="view" class="view" aria-live="polite"></section>
     </main>
   </div>
+
   <div id="toast" class="toast hidden" role="status"></div>
   <script src="/ui/app.js" defer></script>
 </body>

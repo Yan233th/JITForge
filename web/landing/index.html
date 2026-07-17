@@ -3,56 +3,69 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="JITForge turns intent into validated, callable Unix tools.">
-  <title>JITForge — Tools, forged on demand</title>
-  <link rel="stylesheet" href="/assets/landing.css?v=20260716-1">
+  <meta name="description" content="JITForge registers intents as reviewed, versioned Unix tools.">
+  <title>JITForge — Register once, call by revision</title>
+  <link rel="stylesheet" href="/assets/landing.css?v=20260717-7">
 </head>
 <body>
-  <div class="page-shell">
-    <header class="topbar">
+  <div class="site-frame">
+    <header class="site-header">
       <a class="brand" href="/" aria-label="JITForge home">
         <span class="brand-mark" aria-hidden="true">JF</span>
-        <span>JITForge</span>
+        <span class="brand-name">JITForge</span>
       </a>
-      <span class="version">v0.1.0 / Linux</span>
+      <div class="gateway-facts" aria-label="Release facts">
+        <span>PUBLIC GATEWAY</span>
+        <span>v0.1.0</span>
+        <span>linux/x86_64</span>
+      </div>
     </header>
 
     <main>
-      <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-copy">
-          <p class="eyebrow"><span class="live-dot" aria-hidden="true"></span> Synthesis runtime online</p>
-          <h1 id="hero-title">Tools, forged<br>on demand.</h1>
-          <p class="lede">Turn an intent into a validated, versioned Unix tool—then call it from your terminal or manage it in the browser.</p>
-          <div class="actions">
-            <a class="button primary" href="/downloads/jit-linux-x86_64" download>
+      <section class="release-record" aria-labelledby="hero-title">
+        <div class="release-copy">
+          <p class="record-id">BUILD RECORD / PUBLIC RELEASE</p>
+          <h1 id="hero-title">Register once.<br>Call a reviewed artifact by name and revision.</h1>
+          <p class="lede">JITForge turns an intent, real input samples, and strict examples into a validated Unix tool. The model leaves the path after publication; later calls execute the selected Artifact.</p>
+
+          <ol class="revision-path" aria-label="JITForge publication path">
+            <li>
+              <span class="step-index">01</span>
+              <span class="step-object">REGISTER</span>
+              <span class="step-detail">intent + sample + example</span>
+            </li>
+            <li>
+              <span class="step-index">02</span>
+              <span class="step-object">VALIDATE</span>
+              <span class="step-detail">contract + verifier + sandbox</span>
+            </li>
+            <li>
+              <span class="step-index">03</span>
+              <span class="step-object">PUBLISH</span>
+              <span class="step-detail">artifact@revision + sha256 digest</span>
+            </li>
+          </ol>
+
+          <div class="release-actions">
+            <a class="action primary" href="/downloads/jit-linux-x86_64" download>
+              <span class="action-code">GET</span>
               <span>Download CLI</span>
-              <span class="button-icon" aria-hidden="true">↓</span>
+              <span aria-hidden="true">↓</span>
             </a>
-            <a class="button secondary" href="/ui/">
+            <a class="action" href="/ui/">
+              <span class="action-code">UI</span>
               <span>Open Console</span>
-              <span class="button-icon" aria-hidden="true">↗</span>
+              <span aria-hidden="true">↗</span>
             </a>
           </div>
-          <p class="download-meta">jit 0.1.0 · Linux x86_64 · glibc 2.34+ · 4.2 MB</p>
-          <div class="quick-install">
-            <div class="quick-install-head">
-              <span class="quick-install-title">
-                <span>Install with curl</span>
-                <strong>Linux x86_64</strong>
-              </span>
-              <button id="copy-command" type="button">Copy</button>
-            </div>
-            <pre><code id="install-command">curl -fsSL &lt;this-host&gt;/downloads/jit-linux-x86_64 -o jit
-chmod +x jit
-./jit --version</code></pre>
-          </div>
+          <p class="download-meta">jit 0.1.0 / Linux x86_64 / glibc 2.34+ / 4.2 MB</p>
         </div>
 
-        <aside class="status-card" aria-labelledby="status-title">
-          <div class="status-head">
+        <aside class="runtime-record" aria-labelledby="status-title">
+          <div class="runtime-header">
             <div>
-              <p class="status-kicker">Live systems</p>
-              <h2 id="status-title">Service status</h2>
+              <p class="record-id">RUNTIME CHECK</p>
+              <h2 id="status-title">Gateway readiness</h2>
             </div>
             <span id="refresh-countdown" class="refresh-countdown" aria-live="polite">Refresh in 10s</span>
           </div>
@@ -74,7 +87,7 @@ chmod +x jit
               <span class="status-indicator" aria-hidden="true"></span>
               <div class="status-name">
                 <code>/readyz</code>
-                <span>Database &amp; worker</span>
+                <span>Registry + worker</span>
               </div>
               <div class="status-value">
                 <strong>Checking</strong>
@@ -83,19 +96,48 @@ chmod +x jit
             </div>
           </div>
 
-          <div class="status-foot">
-            <span>Automatic checks</span>
+          <div class="runtime-contract" aria-label="Invocation and delivery contract">
+            <div class="runtime-section-label">UNIX INVOCATION CONTRACT</div>
+            <div class="contract-row"><span>INPUT</span><code>stdin / args</code></div>
+            <div class="contract-row"><span>DATA</span><code>stdout</code></div>
+            <div class="contract-row"><span>DIAGNOSTIC</span><code>stderr</code></div>
+            <div class="contract-row"><span>RESULT</span><code>exit code</code></div>
+            <div class="runtime-section-label">DELIVERY BOUNDARY</div>
+            <div class="contract-row"><span>EXTERNAL</span><code>Cloudflare TLS</code></div>
+            <div class="contract-row"><span>INTERNAL</span><code>HTTP / Docker network</code></div>
+          </div>
+
+          <div class="runtime-footer">
+            <span>AUTOMATIC PROBE</span>
             <span id="last-checked">Waiting for first response</span>
           </div>
         </aside>
       </section>
+
+      <section class="install-record" aria-labelledby="install-title">
+        <div class="install-header">
+          <div>
+            <p class="record-id">CLI INSTALLATION</p>
+            <h2 id="install-title">Place the CLI on your path</h2>
+          </div>
+          <div class="install-controls">
+            <span>LINUX X86_64</span>
+            <button id="copy-command" type="button">Copy command</button>
+          </div>
+        </div>
+        <pre><code id="install-command">curl -fsSL &lt;this-host&gt;/downloads/jit-linux-x86_64 -o jit
+chmod +x jit
+./jit --version</code></pre>
+      </section>
     </main>
 
-    <footer>
+    <footer class="site-footer">
       <span>JITFORGE / 2026</span>
-      <span>Intent → artifact → invocation</span>
+      <a class="footer-link" href="/slides/">PROJECT SLIDES ↗</a>
+      <span>CONTRACT → ARTIFACT → INVOCATION</span>
+      <span>HTTP INSIDE / TLS AT THE TUNNEL</span>
     </footer>
   </div>
-  <script src="/assets/landing.js?v=20260716-1" defer></script>
+  <script src="/assets/landing.js?v=20260717-2" defer></script>
 </body>
 </html>
