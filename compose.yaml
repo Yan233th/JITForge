@@ -122,6 +122,10 @@ services:
       - ./deployments/nginx:/etc/nginx/conf.d:ro
       - ./web/landing:/srv/jitforge/landing:ro
       - type: bind
+        source: ${JITFORGE_SLIDES_DIR:-./docs/slides}
+        target: /srv/jitforge/slides
+        read_only: true
+      - type: bind
         source: ${JITFORGE_DOWNLOAD_DIR:-./.data/downloads}
         target: /srv/jitforge/downloads
         read_only: true
