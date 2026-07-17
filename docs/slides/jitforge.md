@@ -5,7 +5,7 @@ paginate: true
 html: true
 size: 16:9
 lang: zh-CN
-title: JITForge — 面向 Agent 与 CI 的能力生成与发布平台
+title: JITForge — 面向 Agent 与自动化流水线的能力生成与发布平台
 description: Contract、Verifier、Artifact、Registry 与受约束执行
 style: |
   :root {
@@ -264,7 +264,7 @@ style: |
 <div class="cover-layout">
   <div>
     <p class="docline">JITFORGE / RELEASE RECORD 0001</p>
-    <h1>面向 Agent 与 CI 的<br>能力生成与发布平台</h1>
+    <h1>面向 Agent 与自动化流水线的<br>能力生成与发布平台</h1>
     <p class="lead">模型负责生成，JITForge 负责验证、版本管理和后续调用；<br>一次性脚本由此成为可复现的 Unix 能力。</p>
     <p class="cover-command">需求 + 输入样本 + 输出示例 → name@revision</p>
   </div>
@@ -306,32 +306,36 @@ style: |
 
 ---
 
-<p class="docline">PRODUCT FIT / UX</p>
+<p class="docline">CI / PULL REQUEST</p>
 
-## 产品定位与交互
+## Pull Request 变更报告
 
-<div class="terminal terminal-wide">
-
-```bash
-docker ps -a | jit register docker-ps-json \
-  "把原始文本转成只含 id、image、status 的 JSON 数组"
-```
-
+<div class="route-map">
+  <div class="route-box edge"><strong>Pull Request</strong><span>提交或更新触发自动化流水线（CI）</span></div>
+  <div class="arrow">→</div>
+  <div class="route-box"><strong>git-change-report@1</strong><span>Token 鉴权 · 固定 revision · 无模型调用</span></div>
+  <div class="arrow">→</div>
+  <div class="route-box"><strong>CI Report</strong><span>change-report.json；供后续检查与审查读取</span></div>
 </div>
 
-<div class="publish-grid">
-  <div class="sheet spine">
-    <div class="sheet-head"><span>PUBLICATION TRACE</span><span>ONE REQUEST</span></div>
-    <div class="spine-row"><span class="spine-index">01</span><span class="spine-object">Input Sample</span><span class="spine-detail">管道 stdin 原样进入注册请求，多行和制表符不用重新转义</span></div>
-    <div class="spine-row"><span class="spine-index">02</span><span class="spine-object">Contract</span><span class="spine-detail">先确认要做什么、输入输出和出错方式，再写源码</span></div>
-    <div class="spine-row"><span class="spine-index">03</span><span class="spine-object">Validation</span><span class="spine-detail">生成结果经过独立检查，并在受限环境里实际运行</span></div>
-    <div class="spine-row"><span class="spine-index">04</span><span class="spine-object">Revision</span><span class="spine-detail">通过后保存版本，得到 <span class="mono">name@revision</span></span></div>
+<div class="cols two">
+  <div class="terminal" style="align-self:start">
+
+```bash
+git diff --numstat --no-renames \
+  "$BASE_SHA" "$HEAD_SHA" \
+  | jit call git-change-report@1 \
+  > change-report.json
+```
+
   </div>
-  <div class="publish-result">
-    <span class="stamp ready">product fit</span>
-    <p class="mono">text / json · short-lived · stateless</p>
-    <p class="small">适合输入输出明确，并且会在 Agent / CI 中反复出现的胶水任务。</p>
-    <p class="small muted">需要版本管理、撤销、回滚或调用记录时，也适合进入 Registry。</p>
+
+  <div class="sheet manifest">
+    <div class="sheet-head"><span>CI CONTRACT</span><span>PINNED REVISION</span></div>
+    <div class="record-row"><span class="record-key">INPUT</span><span class="record-value"><span class="mono">base / head</span> 之间的 <span class="mono">git diff --numstat</span></span></div>
+    <div class="record-row"><span class="record-key">OUTPUT</span><span class="record-value">文件数、增删行、目录分布与最大变更</span></div>
+    <div class="record-row"><span class="record-key">FAILURE</span><span class="record-value">输入格式错误时 stdout 为空，exit code 非零</span></div>
+    <div class="record-row"><span class="record-key">REUSE</span><span class="record-value">Agent、Shell 与 CI 调用同一 Artifact</span></div>
   </div>
 </div>
 
@@ -527,7 +531,7 @@ docker ps -a | jit register docker-ps-json \
 
 ---
 
-<p class="docline">CASE RECORD / OFFLINE FILTER</p>
+<p class="docline">CASE RECORD / CI FILTER</p>
 
 ## `git-change-report@1`
 
@@ -536,7 +540,8 @@ docker ps -a | jit register docker-ps-json \
 
 ```bash
 git diff --numstat --no-renames HEAD~1 HEAD \
-  | jit call git-change-report@1 | jq .
+  | jit call git-change-report@1 \
+  | tee change-report.json | jq .
 ```
 
 ```json
@@ -629,10 +634,10 @@ Fixture 合成测试 / 实时调用复用同一 Contract
 </div>
 
 <table class="value-table" style="margin-top:17px">
-  <thead><tr><th>使用位置</th><th>已经跑通的链路</th><th>留下的工程记录</th></tr></thead>
+  <thead><tr><th>使用位置</th><th>现有链路</th><th>工程记录</th></tr></thead>
   <tbody>
-    <tr><td>Agent / Shell / CI</td><td>CLI 注册、等待与调用；按 <span class="mono">name@revision</span> 选择版本</td><td class="mono">Contract · Artifact · Digest</td></tr>
-    <tr><td>Web Console</td><td>注册、审查、调用与撤销；任务和系统状态可直接查看</td><td class="mono">Revision · Trace · Invocation</td></tr>
+    <tr><td>Pull Request / CI</td><td><span class="mono">git diff</span> → <span class="mono">git-change-report@1</span> → JSON 报告</td><td class="mono">Contract · Artifact · Invocation</td></tr>
+    <tr><td>Agent / Shell</td><td>按 <span class="mono">stable</span> 或固定 revision 调用；stdin / stdout 保持 Unix 语义</td><td class="mono">Revision · Digest · Exit Code</td></tr>
     <tr><td>HTTP Capability</td><td>审批联网范围，Grant 随 Artifact 发布并可撤销</td><td class="mono">Approval · Grant · Audit</td></tr>
   </tbody>
 </table>
