@@ -1,5 +1,6 @@
 "use strict";
 
+const STATUS_REFRESH_SECONDS = 10;
 const state = { csrf: null, expiresAt: null, pollTimer: null, toolsController: null };
 const $ = (selector) => document.querySelector(selector);
 
@@ -73,6 +74,7 @@ async function api(path, options = {}) {
 function showLogin(message = "") {
   state.csrf = null;
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
+  state.pollTimer = null;
   $("#app-shell").classList.add("hidden");
   $("#login-view").classList.remove("hidden");
   $("#login-error").textContent = message;
@@ -83,6 +85,10 @@ function showLogin(message = "") {
 function showApp(session) {
   state.csrf = session.csrf_token;
   state.expiresAt = session.expires_at;
+  const expiry = new Date(session.expires_at);
+  $("#session-expiry").textContent = Number.isNaN(expiry.getTime())
+    ? "SESSION ACTIVE"
+    : `SESSION / ${expiry.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })} EXPIRES`;
   $("#login-view").classList.add("hidden");
   $("#app-shell").classList.remove("hidden");
   route();
@@ -110,6 +116,7 @@ function errorView(error) {
 async function route() {
   if (!state.csrf) return;
   if (state.pollTimer) window.clearTimeout(state.pollTimer);
+  state.pollTimer = null;
   if (state.toolsController) state.toolsController.abort();
   const view = $("#view");
   clear(view);
@@ -129,61 +136,163 @@ async function route() {
 }
 
 async function healthProbe(path) {
+  const startedAt = performance.now();
   try {
     const response = await fetch(path, { cache: "no-store", credentials: "same-origin" });
-    return { reachable: true, ok: response.ok, body: await response.json() };
+    const body = await response.json().catch(() => null);
+    return {
+      reachable: true,
+      ok: response.ok,
+      status: response.status,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      body
+    };
   } catch (error) {
-    return { reachable: false, ok: false, body: null, error };
+    return {
+      reachable: false,
+      ok: false,
+      status: null,
+      elapsedMs: Math.round(performance.now() - startedAt),
+      body: null,
+      error
+    };
   }
 }
 
-function systemStatusRow(name, description, ready, meta) {
+function systemStatusRow(name, description, ready, label, meta) {
   return element("article", { className: `status-row ${ready ? "ready" : "failed"}` }, [
     element("span", { className: "status-dot" }),
     element("div", { className: "status-copy" }, [element("h3", { text: name }), element("p", { text: description })]),
     element("div", { className: "status-value" }, [
-      element("strong", { text: ready ? "运行正常" : "当前不可用" }),
+      element("strong", { text: label }),
       element("span", { text: meta })
     ])
   ]);
 }
 
+function probeMeta(probe) {
+  if (!probe.reachable) return `NO RESPONSE · ${probe.elapsedMs} ms`;
+  return `HTTP ${probe.status} · ${probe.elapsedMs} ms`;
+}
+
+function statusList(rows) {
+  return element("div", { className: "status-list flush" }, rows);
+}
+
 async function renderStatus(view) {
   setPage("运行状态", "System Status");
-  const checkedAt = element("span", { className: "panel-meta", text: "尚未检查" });
+  const checkedAt = element("span", { className: "panel-meta", text: "首次检查中" });
+  const countdown = element("span", { className: "panel-meta status-countdown", text: "自动刷新" });
   const refresh = element("button", { className: "ghost", text: "重新检查", type: "button" });
-  const actions = element("div", { className: "panel-actions" }, [checkedAt, refresh]);
-  const content = element("div", {}, loadingRows(3));
-  view.append(panel("服务组件", content, actions));
+  const actions = element("div", { className: "panel-actions" }, [checkedAt, countdown, refresh]);
+  const summary = element("div", {}, loadingRows(1));
+  const endpoints = element("div", {}, loadingRows(2));
+  const components = element("div", {}, loadingRows(3));
+  view.append(element("section", { className: "status-sheet" }, [
+    element("div", { className: "status-sheet-header" }, [
+      element("h2", { text: "Readiness Record" }),
+      actions
+    ]),
+    summary,
+    element("div", { className: "status-section-label", text: "HTTP PROBES" }),
+    endpoints,
+    element("div", { className: "status-section-label", text: "REQUIRED COMPONENTS" }),
+    components
+  ]));
+
+  let refreshing = false;
+  let nextRefreshAt = 0;
+
+  const schedule = () => {
+    if (location.hash !== "#/status") return;
+    const seconds = Math.max(0, Math.ceil((nextRefreshAt - Date.now()) / 1000));
+    countdown.textContent = `${seconds} 秒后刷新`;
+    if (seconds === 0) {
+      load();
+      return;
+    }
+    state.pollTimer = window.setTimeout(schedule, 250);
+  };
 
   const load = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    if (state.pollTimer) window.clearTimeout(state.pollTimer);
+    state.pollTimer = null;
     refresh.disabled = true;
     refresh.textContent = "检查中…";
+    countdown.textContent = "正在刷新";
     const [health, readiness] = await Promise.all([healthProbe("/healthz"), healthProbe("/readyz")]);
     const serverReady = health.reachable && health.ok && health.body?.status === "ok";
-    const databaseReady = readiness.reachable && Boolean(readiness.body?.database);
-    const workerReady = readiness.reachable && Boolean(readiness.body?.worker);
+    const readinessReady = readiness.reachable && readiness.ok && readiness.body?.status === "ready";
+    const databaseReady = readinessReady && Boolean(readiness.body?.database);
+    const workerReady = readinessReady && Boolean(readiness.body?.worker);
     const allReady = serverReady && databaseReady && workerReady;
     const version = health.body?.version ? `v${health.body.version}` : "版本未知";
+    const service = health.body?.service || "jit-server";
 
-    clear(content);
-    content.append(
+    clear(summary);
+    summary.append(
       element("div", { className: `status-overview ${allReady ? "ready" : "failed"}` }, [
         element("span", { className: "status-dot" }),
         element("div", {}, [
           element("strong", { text: allReady ? "所有必要组件运行正常" : "部分必要组件尚未就绪" }),
-          element("p", { text: allReady ? "工具注册、合成与调用链路均可用。" : "请查看下方组件状态定位不可用环节。" })
+          element("p", { text: allReady
+            ? "入口、Registry 与 Worker 均通过实时检查，能力注册、合成和调用链路可用。"
+            : "下方保留端点返回和组件结果，可直接定位没有通过的环节。" })
         ])
-      ]),
-      element("div", { className: "status-list" }, [
-        systemStatusRow("JITForge Server", "HTTP API 与管理界面请求入口", serverReady, version),
-        systemStatusRow("Registry / PostgreSQL", "工具、版本与任务的持久化存储", databaseReady, "实时连接检查"),
-        systemStatusRow("Worker", "合成任务领取、验证与发布执行器", workerReady, "最近 30 秒心跳")
       ])
     );
+
+    clear(endpoints);
+    endpoints.append(statusList([
+      systemStatusRow(
+        "/healthz",
+        `${service} 进程存活 · ${version}`,
+        serverReady,
+        serverReady ? "Healthy" : "检查失败",
+        probeMeta(health)
+      ),
+      systemStatusRow(
+        "/readyz",
+        `database=${Boolean(readiness.body?.database)} · worker=${Boolean(readiness.body?.worker)}`,
+        readinessReady && databaseReady && workerReady,
+        readinessReady && databaseReady && workerReady ? "Ready" : "Not ready",
+        probeMeta(readiness)
+      )
+    ]));
+
+    clear(components);
+    components.append(statusList([
+      systemStatusRow(
+        "JITForge Server",
+        "HTTP API、浏览器 Console 与健康检查入口",
+        serverReady,
+        serverReady ? "运行正常" : "当前不可用",
+        `${service} · ${version}`
+      ),
+      systemStatusRow(
+        "Registry / PostgreSQL",
+        "能力、Revision、任务、Trace 与授权记录",
+        databaseReady,
+        databaseReady ? "连接正常" : "连接失败",
+        `database=${Boolean(readiness.body?.database)}`
+      ),
+      systemStatusRow(
+        "Worker",
+        "合成任务领取、Verifier、Sandbox 与 Artifact 发布",
+        workerReady,
+        workerReady ? "心跳正常" : "没有有效心跳",
+        `worker=${Boolean(readiness.body?.worker)} · 30s window`
+      )
+    ]));
+
     checkedAt.textContent = `检查于 ${new Date().toLocaleTimeString("zh-CN")}`;
     refresh.disabled = false;
     refresh.textContent = "重新检查";
+    refreshing = false;
+    nextRefreshAt = Date.now() + STATUS_REFRESH_SECONDS * 1000;
+    schedule();
   };
 
   refresh.addEventListener("click", load);
@@ -191,7 +300,7 @@ async function renderStatus(view) {
 }
 
 async function renderTools(view, offset = 0, search = "", status = "ready") {
-  setPage("工具", "Capabilities", { text: "注册新工具", href: "#/register" });
+  setPage("能力", "Capabilities", { text: "注册新能力", href: "#/register" });
   const searchInput = element("input", { type: "search", value: search, placeholder: "搜索名称或能力描述" });
   const statusSelect = element("select");
   [
@@ -206,7 +315,7 @@ async function renderTools(view, offset = 0, search = "", status = "ready") {
     element("button", { className: "primary compact-button", text: "搜索", type: "submit" })
   ]);
   const resultMeta = element("span", { className: "panel-meta", text: "加载中" });
-  const results = element("div", { className: "results-region tool-results" }, loadingCards());
+  const results = element("div", { className: "results-region tool-results" }, loadingRows(6));
   const toolPanel = panel("能力列表", [form, results], resultMeta);
   const jobsRegion = element("div", { className: "results-region" }, loadingRows(3));
   view.append(toolPanel, panel("最近合成任务", jobsRegion));
@@ -249,18 +358,29 @@ async function renderTools(view, offset = 0, search = "", status = "ready") {
 }
 
 function renderToolsResult(tools, offset, previousPage, nextPage) {
-  const viewport = element("div", { className: "capability-viewport" });
-  const grid = element("div", { className: "capability-grid" });
+  const ledger = element("div", { className: "capability-ledger" });
+  ledger.setAttribute("role", "table");
+  ledger.setAttribute("aria-label", "能力 Registry");
   if (tools.tools.length) {
-    tools.tools.forEach((tool, index) => grid.append(capabilityCard(tool, offset + index + 1)));
+    const head = element("div", { className: "capability-head" }, [
+      element("span", { text: "#" }),
+      element("span", { text: "Tool / contract summary" }),
+      element("span", { text: "I/O" }),
+      element("span", { text: "Stable" }),
+      element("span", { text: "Latest" }),
+      element("span", { text: "State" }),
+      element("span", { text: "" })
+    ]);
+    head.setAttribute("role", "row");
+    ledger.append(head);
+    tools.tools.forEach((tool, index) => ledger.append(capabilityRow(tool, offset + index + 1)));
   } else {
-    grid.append(element("div", { className: "capability-empty" }, [
+    ledger.append(element("div", { className: "capability-empty" }, [
       element("span", { className: "empty-glyph", text: "∅" }),
       element("strong", { text: "没有匹配的能力" }),
       element("span", { text: "调整关键词或状态范围后再次搜索" })
     ]));
   }
-  viewport.append(grid);
   const pager = element("div", { className: "form-actions" });
   if (offset > 0) {
     const previous = element("button", { className: "ghost", text: "上一页", type: "button" });
@@ -272,29 +392,28 @@ function renderToolsResult(tools, offset, previousPage, nextPage) {
     next.addEventListener("click", () => nextPage(tools.next_offset));
     pager.append(next);
   }
-  return element("div", {}, [viewport, pager]);
+  return element("div", {}, [ledger, pager]);
 }
 
-function capabilityCard(tool, index) {
-  const card = element("article", { className: "capability-card" });
-  const top = element("div", { className: "capability-card-top" }, [
-    element("span", { className: "card-kicker", text: `${String(index).padStart(2, "0")} / capability` }),
-    badge(tool.status)
-  ]);
-  const title = element("h3", { text: tool.tool });
-  const description = element("p", { className: "capability-description", text: tool.description });
-  const footer = element("div", { className: "capability-footer" }, [
-    element("div", { className: "tech-tags" }, [
-      element("span", { className: "tech-tag", text: `${tool.input_format} → ${tool.output_format}` }),
-      element("span", { className: "tech-tag", text: `stable / ${tool.stable_revision ?? "—"}` })
+function capabilityRow(tool, index) {
+  const row = element("article", { className: "capability-row" }, [
+    element("span", { className: "capability-sequence", text: String(index).padStart(2, "0") }),
+    element("div", { className: "capability-identity" }, [
+      element("strong", { text: tool.tool }),
+      element("p", { className: "capability-description", text: tool.description })
     ]),
-    element("span", { className: "capability-link", text: `rev ${tool.latest_revision}  ↗` })
+    element("span", { className: "capability-format", text: `${tool.input_format} → ${tool.output_format}` }),
+    element("span", { className: "capability-revision stable", text: tool.stable_revision ? `@${tool.stable_revision}` : "—" }),
+    element("span", { className: "capability-revision latest", text: tool.latest_revision ? `@${tool.latest_revision}` : "—" }),
+    badge(tool.status),
+    element("span", { className: "capability-open", text: "↗" })
   ]);
-  card.append(top, title, description, footer);
-  card.addEventListener("click", () => { location.hash = `#/tools/${encodeURIComponent(tool.tool)}`; });
-  card.tabIndex = 0;
-  card.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); card.click(); } });
-  return card;
+  row.setAttribute("role", "row");
+  row.setAttribute("aria-label", `查看 ${tool.tool}`);
+  row.addEventListener("click", () => { location.hash = `#/tools/${encodeURIComponent(tool.tool)}`; });
+  row.tabIndex = 0;
+  row.addEventListener("keydown", (event) => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); row.click(); } });
+  return row;
 }
 
 function loadingRows(count = 5) {
@@ -322,7 +441,7 @@ function tableHead(labels) {
 function jobsTable(jobs) {
   if (!jobs.length) return element("div", { className: "empty", text: "还没有合成任务" });
   const table = element("table");
-  table.append(tableHead(["工具版本", "任务状态", "版本状态", "阶段", "更新时间", "错误"]));
+  table.append(tableHead(["能力版本", "任务状态", "版本状态", "阶段", "更新时间", "错误"]));
   const body = element("tbody");
   for (const job of jobs) {
     const row = element("tr", { className: "clickable" });
@@ -369,12 +488,18 @@ async function renderJob(view, jobId) {
   setPage("任务详情", "Job Detail");
   const job = await api(`/v1/jobs/${encodeURIComponent(jobId)}`);
   const rows = definitionList([
-    ["Job ID", job.job_id], ["工具", `${job.tool}@${job.revision}`], ["状态", job.status], ["阶段", job.stage],
+    ["Job ID", job.job_id], ["能力", `${job.tool}@${job.revision}`], ["状态", job.status], ["阶段", job.stage],
     ["版本状态", job.version_status], ["创建时间", formatTime(job.created_at)], ["更新时间", formatTime(job.updated_at)],
     ["错误", job.error ? `${job.error.code}: ${job.error.message}` : "—"]
   ]);
-  const action = job.status === "ready" ? element("a", { className: "button primary", text: "查看工具", href: `#/tools/${encodeURIComponent(job.tool)}@${job.revision}` }) : null;
-  view.append(panel(`${job.tool}@${job.revision}`, rows, action));
+  const actions = element("div", { className: "panel-actions" });
+  if (job.status === "ready") actions.append(element("a", { className: "button primary", text: "查看能力", href: `#/tools/${encodeURIComponent(job.tool)}@${job.revision}` }));
+  if (["queued", "running", "awaiting_input"].includes(job.status)) {
+    const cancel = element("button", { className: "danger", text: "取消任务", type: "button" });
+    cancel.addEventListener("click", () => cancelJob(job));
+    actions.append(cancel);
+  }
+  view.append(panel(`${job.tool}@${job.revision}`, rows, actions.children.length ? actions : null));
   if (job.pending_input) view.append(jobInputPanel(job));
   if (!["ready", "rejected", "awaiting_input"].includes(job.status)) {
     state.pollTimer = window.setTimeout(() => {
@@ -406,7 +531,7 @@ async function renderAccess(view) {
           await api(`/v1/http-capabilities/${encodeURIComponent(approval.capability_hash)}/revoke`, {
             method: "POST", body: JSON.stringify({ reason: reason.trim() })
           });
-          showToast("访问权限已撤销，依赖它的工具将停止联网调用"); route();
+          showToast("访问权限已撤销，依赖它的能力将停止联网调用"); route();
         } catch (error) { showToast(error.message); }
       });
       action.append(revoke);
@@ -471,6 +596,20 @@ async function answerJobInput(job, answer) {
   } catch (error) { showToast(error.message); }
 }
 
+async function cancelJob(job) {
+  const reason = window.prompt(`请输入取消 ${job.tool}@${job.revision} 的原因：`, "cancelled from the Web Console");
+  if (!reason?.trim()) return;
+  if (!window.confirm(`确认取消任务 ${job.job_id}？`)) return;
+  try {
+    await api(`/v1/jobs/${encodeURIComponent(job.job_id)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({ reason: reason.trim() })
+    });
+    showToast(`已取消 ${job.tool}@${job.revision}`);
+    await route();
+  } catch (error) { showToast(error.message); }
+}
+
 function definitionList(entries) {
   const list = element("dl", { className: "definition-list" });
   entries.forEach(([term, value]) => list.append(element("dt", { text: term }), element("dd", { text: value ?? "—" })));
@@ -481,7 +620,7 @@ async function renderTool(view, reference) {
   const at = reference.lastIndexOf("@");
   const name = at > 0 ? reference.slice(0, at) : reference;
   const revision = at > 0 ? Number(reference.slice(at + 1)) : null;
-  setPage("工具能力", name);
+  setPage("能力详情", name);
   const inspectUrl = revision ? `/v1/tools/${encodeURIComponent(name)}?revision=${revision}` : `/v1/tools/${encodeURIComponent(name)}`;
   const [tool, versions] = await Promise.all([api(inspectUrl), api(`/v1/tools/${encodeURIComponent(name)}/versions?limit=100&offset=0`)]);
   const selected = tool.selected;
@@ -583,7 +722,7 @@ function invocationForm(name, selected) {
     element("label", {}, [document.createTextNode("从文件读取（最大 4 MiB）"), file]),
     element("label", {}, [document.createTextNode("参数"), args]),
     element("label", {}, [document.createTextNode("超时（秒）"), timeout]),
-    element("button", { className: "primary", text: "执行工具", type: "submit" }), output
+    element("button", { className: "primary", text: "调用能力", type: "submit" }), output
   );
   form.addEventListener("submit", async (event) => {
     event.preventDefault(); clear(output); output.append(element("p", { className: "muted", text: "执行中…" }));
@@ -614,10 +753,10 @@ async function revokeVersion(name, revision) {
 
 function renderRegister(view) {
   const query = new URLSearchParams(location.hash.split("?")[1] || "");
-  setPage(query.get("name") ? "注册新版本" : "注册工具", query.get("name") ? "Register Revision" : "Register Tool");
+  setPage(query.get("name") ? "注册新版本" : "注册能力", query.get("name") ? "Register Revision" : "Register Capability");
   const form = element("form", { className: "stack" });
   const name = element("input", { value: query.get("name") || "", placeholder: "例如 lscpu-summary", required: true });
-  const intent = element("textarea", { placeholder: "描述要生成的确定性、无状态 Unix 工具能力", required: true });
+  const intent = element("textarea", { placeholder: "描述要生成的确定性、无状态 Unix 能力", required: true });
   const inputFormat = formatSelect(); const outputFormat = formatSelect();
   const sample = element("textarea", { placeholder: "可选：粘贴一份代表性输入样本" });
   const sampleFile = element("input", { type: "file" });
@@ -627,7 +766,7 @@ function renderRegister(view) {
   sampleFile.addEventListener("change", async () => { if (sampleFile.files[0]) sample.value = await readFile(sampleFile.files[0], 256 * 1024); });
   const formats = element("div", { className: "grid-2" }, [element("label", {}, [document.createTextNode("输入格式"), inputFormat]), element("label", {}, [document.createTextNode("输出格式"), outputFormat])]);
   form.append(
-    element("label", {}, [document.createTextNode("工具名称"), name]), element("label", {}, [document.createTextNode("用户 Intent"), intent]), formats,
+    element("label", {}, [document.createTextNode("能力名称"), name]), element("label", {}, [document.createTextNode("用户 Intent"), intent]), formats,
     element("div", { className: "notice", text: "注意：Input Sample 会进入模型上下文与 Agent Trace。不要提交密钥或敏感生产数据。" }),
     element("label", {}, [document.createTextNode("Input Sample（可选）"), sample]), element("label", {}, [document.createTextNode("从文本文件读取样本"), sampleFile]),
     element("div", { className: "section-heading" }, [element("h3", { text: "严格 Examples" }), addExample]), examples,
@@ -644,7 +783,7 @@ function renderRegister(view) {
       showToast(`已创建 ${response.tool}@${response.revision}`); location.hash = `#/jobs/${response.job_id}`;
     } catch (error) { showToast(error.message); }
   });
-  view.append(panel("描述它，生成它，调用它", form));
+  view.append(panel("Registration Manifest", form));
 }
 
 function formatSelect() {
