@@ -574,7 +574,7 @@ git diff --numstat --no-renames HEAD~1 HEAD \
   <div>
 
 ```bash
-printf '上海\n' | jit call current-weather@2 | jq .
+printf '上海' | jit call current-weather@2 | jq .
 ```
 
 <div class="weather-output">
@@ -615,9 +615,9 @@ Fixture 合成测试 / 实时调用复用同一 Contract
 
 ---
 
-<p class="docline">REGISTRY / CURRENT SNAPSHOT</p>
+<p class="docline">REGISTRY / DEPLOYED SNAPSHOT</p>
 
-## Registry 与工程快照
+## Registry 快照与实际落点
 
 <div class="snapshot-ledger">
   <div class="snapshot-item"><div class="snapshot-value">48</div><div class="snapshot-label">capability names</div></div>
@@ -628,39 +628,18 @@ Fixture 合成测试 / 实时调用复用同一 Contract
   <div class="snapshot-item"><div class="snapshot-value">5</div><div class="snapshot-label">capability approvals</div></div>
 </div>
 
-<table style="margin-top:17px">
-  <thead><tr><th>已落地对象</th><th>当前职责</th><th>说明</th></tr></thead>
+<table class="value-table" style="margin-top:17px">
+  <thead><tr><th>使用位置</th><th>已经跑通的链路</th><th>留下的工程记录</th></tr></thead>
   <tbody>
-    <tr><td>Landing + CLI</td><td>安装、下载和状态检查</td><td>可直接用于 Agent、Shell 与 CI</td></tr>
-    <tr><td>Web Console + API</td><td>注册、审查、调用与撤销</td><td>人工操作与自动化共用同一 Registry</td></tr>
-    <tr><td>Registry + Worker</td><td>Revision 与 Artifact 持久化；合成任务执行</td><td>Worker 不发布公网端口</td></tr>
-    <tr><td>Nginx + Tunnel</td><td>统一入口与外部 HTTPS</td><td>容器网络内保持 HTTP</td></tr>
+    <tr><td>Agent / Shell / CI</td><td>CLI 注册、等待与调用；按 <span class="mono">name@revision</span> 选择版本</td><td class="mono">Contract · Artifact · Digest</td></tr>
+    <tr><td>Web Console</td><td>注册、审查、调用与撤销；任务和系统状态可直接查看</td><td class="mono">Revision · Trace · Invocation</td></tr>
+    <tr><td>HTTP Capability</td><td>审批联网范围，Grant 随 Artifact 发布并可撤销</td><td class="mono">Approval · Grant · Audit</td></tr>
   </tbody>
 </table>
+
+<p class="small" style="margin-top:15px"><span class="mono">DEPLOYED PATH</span>　Landing / Console / CLI download → Cloudflare Tunnel → Nginx → Server → Registry / Worker</p>
 
 <p class="tiny muted">快照采集于 2026-07-17；数字来自当前 PostgreSQL Registry 与实际 workspace test 列表。</p>
-
----
-
-<p class="docline">VALUE / ROADMAP</p>
-
-## 落地场景与后续工作
-
-<table class="value-table">
-  <thead><tr><th>落点</th><th>当前价值</th><th>对应对象</th></tr></thead>
-  <tbody>
-    <tr><td>Agent Platform</td><td>一次生成即可纳入可发现、可调用、可撤销的能力库</td><td class="mono">name · revision · stable</td></tr>
-    <tr><td>Internal Tooling / CI</td><td>降低小型胶水能力反复建仓、评审与部署的固定成本</td><td class="mono">Contract · Artifact · CLI</td></tr>
-    <tr><td>Governance</td><td>追溯模型写了什么、通过哪些验证、当前调用哪一版，以及所持权限</td><td class="mono">Trace · Digest · Approval</td></tr>
-  </tbody>
-</table>
-
-<div class="sheet spine" style="margin-top:18px">
-  <div class="sheet-head"><span>ROADMAP</span><span>THREE CONCRETE EXTENSIONS</span></div>
-  <div class="spine-row"><span class="spine-index">01</span><span class="spine-object">WASI</span><span class="spine-detail">在同一 Manifest 下引入 WASI 等 Runtime。</span></div>
-  <div class="spine-row"><span class="spine-index">02</span><span class="spine-object">BROKER</span><span class="spine-detail">以临时 Broker / Unix Socket 集中承载网络策略与审计。</span></div>
-  <div class="spine-row"><span class="spine-index">03</span><span class="spine-object">ORACLE</span><span class="spine-detail">建立外部 Oracle 与 benchmark，量化正确率与修复成本。</span></div>
-</div>
 
 ---
 
