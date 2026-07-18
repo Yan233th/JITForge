@@ -1,8 +1,8 @@
 # JITForge
 
-JITForge 将自然语言意图、真实输入样本和可选的严格示例合成为经过验证、可版本化、可审计调用的 Unix 能力。
+JITForge turns natural-language intent, representative inputs, and optional strict examples into validated, versioned Unix capabilities with an auditable invocation path.
 
-模型只参与合成和修复。能力发布后，普通调用直接执行选定的 Artifact，不再经过模型。
+The model participates only during synthesis and repair. Once a capability is published, normal calls execute the selected artifact directly without invoking the model again.
 
 ```text
 Intent + Input Sample + Strict Example
@@ -11,35 +11,35 @@ Intent + Input Sample + Strict Example
   → Sandbox Validation
   → Immutable Artifact
   → name@revision / stable
-  → CLI、Web、Shell、Agent 或自动化流水线调用
+  → CLI, Web, Shell, Agent, or CI invocation
 ```
 
-当前版本为 `0.1.0` alpha，适合自行部署和验证，还不是面向不受信任多租户的公共服务。
+The current release line is `0.1.0` alpha. It is suitable for self-hosted evaluation, but it is not yet a public service for untrusted multi-tenant workloads.
 
-## 适用范围
+## Intended Use
 
-JITForge 面向短时、无状态、输入输出明确的 Unix filter。比较合适的任务包括：
+JITForge is designed for short-lived, stateless Unix filters with explicit inputs and outputs. Good use cases include:
 
-- 运维命令输出解析和报告生成；
-- JSON、CSV、文本的清洗、校验与格式转换；
-- Pull Request / CI 中反复出现的小型胶水逻辑；
-- Agent 和 Shell 需要共同调用、固定版本或留下审计记录的能力；
-- 少量经过审批的公共 HTTPS 数据查询。
+- parsing operational command output and producing reports;
+- cleaning, validating, or converting JSON, CSV, and text;
+- replacing small pieces of glue logic repeated across pull requests or CI jobs;
+- publishing capabilities that Shell users and Agents can share, pin, and audit;
+- performing a small number of explicitly approved public HTTPS queries.
 
-生成运行时目前固定为 Python 3 标准库单文件。长期服务、浏览器自动化、任意第三方依赖、持久化状态，以及需要用户私密凭据的动态能力不在当前范围内。
+Generated programs currently use a fixed, single-file Python 3 standard-library runtime. Long-running services, browser automation, arbitrary third-party dependencies, persistent state, and capabilities that require private user credentials are outside the current scope.
 
-## 核心语义
+## Core Semantics
 
-- 注册时通过管道传入的 stdin 是 **Input Sample**，只用于说明真实输入形状，不附带期望输出。
-- `--example 'INPUT => OUTPUT'` 是用户提供的 **Strict Example**，属于验证断言。发现示例有误时，任务会暂停并请求明确批准；原值仍保留审计记录。
-- Contract 在源码生成前确定输入、输出、错误语义和测试计划，并经过独立 Review。
-- 只有 Contract Review、用户测试、生成测试和 Sandbox 实际执行全部通过，Revision 才会进入 `ready`。
-- `name@revision` 指向不可变版本；裸名称解析当前 `stable` Revision。
-- 调用保持 Unix 语义：业务数据写 stdout，诊断写 stderr，失败使用非零 exit code。
+- Data piped to `register` is an **Input Sample**. It demonstrates the real input shape but does not imply an expected output.
+- `--example 'INPUT => OUTPUT'` supplies a **Strict Example** and becomes a validation assertion. If JITForge detects that an example is incorrect, the job pauses for explicit approval while preserving the original value in the audit record.
+- Before source generation, a Contract defines input, output, failure semantics, and the test plan, then passes through an independent review.
+- A revision becomes `ready` only after Contract Review, user tests, generated tests, and actual sandbox execution all succeed.
+- `name@revision` identifies an immutable revision. A bare name resolves through the current `stable` pointer.
+- Invocation follows Unix conventions: business output goes to stdout, diagnostics go to stderr, and failures return a non-zero exit code.
 
-模型生成的测试和 Verifier 都不能构成形式化正确性证明。它们是发布门槛的一部分，不会取代用户断言和真实 Sandbox 结果。
+Model-generated tests and the independent Verifier do not constitute a formal correctness proof. They are release gates that complement, rather than replace, user assertions and real sandbox results.
 
-## 架构
+## Architecture
 
 ```text
                          ┌──────── PostgreSQL Registry
@@ -52,23 +52,23 @@ jit CLI ──HTTP──> jit-server ──private gRPC──> jit-worker
                          │
                          └── embedded Web Console
 
-Internet ──TLS proxy / tunnel──> Nginx ──> Console、API 与健康端点
+Internet ──TLS proxy / tunnel──> Nginx ──> Console, API, and health endpoints
 ```
 
-`jit-server` 负责 HTTP API、认证、Web Session、Registry 和任务状态，不持有模型密钥，也不接触 Docker Socket。`jit-worker` 是唯一拥有模型配置和 Docker 权限的服务，默认不发布公网端口。
+`jit-server` owns the HTTP API, authentication, browser sessions, registry access, and job status. It does not hold model credentials or access the Docker socket. `jit-worker` is the only service with model configuration and Docker access, and it does not publish a host port by default.
 
-PostgreSQL 保存 Contract、Revision、Artifact 摘要、验证证据、任务 Checkpoint、Trace、Approval 和调用元数据。普通调用的 stdin/stdout 正文默认不入库。
+PostgreSQL stores Contracts, revisions, artifact digests, validation evidence, job checkpoints, traces, approvals, and invocation metadata. Invocation stdin and stdout bodies are not stored by default.
 
-## 快速开始
+## Quick Start
 
-### 环境要求
+### Requirements
 
-- Linux 与 Docker Engine / Docker Compose；
-- 已注册为 Docker Runtime 的 [gVisor `runsc`](https://gvisor.dev/docs/user_guide/install/)；
-- Rust 1.97 和 `protoc`；
-- 真实合成模式还需要支持原生 tool calls 的 OpenAI Chat Completions 兼容接口。
+- Linux with Docker Engine and Docker Compose;
+- [gVisor `runsc`](https://gvisor.dev/docs/user_guide/install/) registered as a Docker runtime;
+- Rust 1.97 and `protoc`;
+- for real synthesis, an OpenAI Chat Completions-compatible endpoint with native tool-call support.
 
-先确认 `runsc` 可以被 Docker 使用：
+Verify that Docker can use `runsc`:
 
 ```bash
 runsc --version
@@ -76,17 +76,17 @@ docker info --format '{{json .Runtimes}}'
 docker run --rm --runtime=runsc python:3.13-alpine python3 -c 'print("gvisor-ok")'
 ```
 
-### 使用 Fixture 跑通完整闭环
+### Exercise the Full Path with the Fixture Synthesizer
 
-Fixture Synthesizer 不需要模型 API Key，只接受带 `[fixture:...]` 标记的测试注册。它适合验证 PostgreSQL、Worker、Server、Runner、Artifact 和 CLI 是否接通，不代表真实合成效果。
+The Fixture Synthesizer requires no model API key and accepts only test registrations marked with `[fixture:...]`. It verifies that PostgreSQL, Worker, Server, Runner, Artifact storage, and the CLI are connected; it does not represent real model quality.
 
-复制本地 Compose 配置：
+Create a local Compose environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-编辑 `.env`，至少替换两个 Token，并将合成模式设为：
+Edit `.env`, replace at least the two tokens, and select fixture mode:
 
 ```dotenv
 JITFORGE_TOKEN=choose-a-local-client-token
@@ -94,14 +94,14 @@ JITFORGE_WORKER_TOKEN=choose-a-different-worker-token
 JITFORGE_SYNTHESIZER_MODE=fixture
 ```
 
-`.env` 已被 Git 忽略，不要提交它。然后编译控制面和 CLI，启动完整 Compose Profile：
+`.env` is ignored by Git and must not be committed. Build the control plane and CLI, then start the complete Compose profile:
 
 ```bash
 cargo build --locked --release -p jit-cli -p jit-server -p jit-worker
 docker compose --profile containerized up --build -d
 ```
 
-检查服务：
+Check service health:
 
 ```bash
 curl -f http://127.0.0.1:8090/healthz
@@ -109,14 +109,14 @@ curl -f http://127.0.0.1:8090/readyz
 docker compose ps
 ```
 
-让 CLI 连接到本地 Gateway，Token 与 `.env` 保持一致：
+Point the CLI at the local Gateway, using the same client token as `.env`:
 
 ```bash
 export JITFORGE_SERVER=http://127.0.0.1:8090
 export JITFORGE_TOKEN=choose-a-local-client-token
 ```
 
-注册并调用 Fixture 能力：
+Register and invoke a fixture capability:
 
 ```bash
 printf 'Hello Cloud Native\n' |
@@ -127,22 +127,22 @@ printf 'Hello Cloud Native\n' |
 printf 'Hello Cloud Native\n' | target/release/jit call slugify
 ```
 
-预期 stdout：
+Expected stdout:
 
 ```text
 hello-cloud-native
 ```
 
-Gateway 根路径会以 `307 Temporary Redirect` 跳转到 Web Console：
+The Gateway root responds with `307 Temporary Redirect` and sends the browser to the Web Console:
 
 ```text
 http://127.0.0.1:8090/
   → http://127.0.0.1:8090/ui/
 ```
 
-### 切换到真实模型
+### Switch to a Real Model
 
-将 `.env` 中的合成模式改回 `openai`，并配置模型接口：
+Change the synthesis mode in `.env` and configure the model endpoint:
 
 ```dotenv
 JITFORGE_SYNTHESIZER_MODE=openai
@@ -153,9 +153,9 @@ JITFORGE_LLM_VERIFIER_MODEL=replace-me
 JITFORGE_LLM_THINKING=auto
 ```
 
-Coder 和 Verifier 使用独立上下文。两个配置项可以选择同一个模型，但 `JITFORGE_LLM_VERIFIER_MODEL` 仍需显式填写。模型接口必须支持 `tools`、`tool_choice`、assistant `tool_calls` 和后续 tool result 消息。
+The Coder and Verifier use separate contexts. They may use the same model, but `JITFORGE_LLM_VERIFIER_MODEL` must still be set explicitly. The provider must support `tools`, `tool_choice`, assistant `tool_calls`, and subsequent tool-result messages.
 
-更新环境变量后重建 Worker 容器：
+Recreate the application containers after changing model configuration:
 
 ```bash
 docker compose --profile containerized up -d --force-recreate worker server nginx
@@ -176,82 +176,82 @@ jit call NAME[@REVISION] [--input TEXT | --file PATH] [-- TOOL_ARGS...]
 jit revoke NAME@REVISION --reason TEXT
 ```
 
-`register` 默认等待任务进入 `ready`、`rejected` 或等待用户输入的状态。使用 `--no-wait --json` 时会立即返回 Job ID，之后用 `status` 查询。`answer` 用于澄清问题、批准示例修正或 HTTP Capability；`cancel` 可以终止排队中、运行中或已暂停的任务。
+`register` waits by default until the job reaches `ready`, `rejected`, or a state that requires user input. With `--no-wait --json`, it returns a Job ID immediately; use `status` to follow the job. `answer` supplies clarification, approves an example correction, or approves an HTTP Capability. `cancel` stops queued, running, or paused jobs.
 
-`call` 会转发远端 stdout、stderr 和退出码。自动化流水线建议固定 `name@revision`，交互使用可以选择裸名称的 `stable` 指针。
+`call` forwards the remote stdout, stderr, and exit code. Automation should pin `name@revision`; interactive use may choose the bare name and its `stable` pointer.
 
-配置读取顺序为 CLI 参数、环境变量、配置文件。默认配置文件是 `~/.config/jitforge/config.toml`，也支持 `$XDG_CONFIG_HOME/jitforge/config.toml` 和 `JITFORGE_CONFIG`。配置文件含 Token 或 API Key 时，Unix 权限必须为 `0600`。
+Configuration precedence is CLI arguments, environment variables, then the configuration file. The default file is `~/.config/jitforge/config.toml`; `$XDG_CONFIG_HOME/jitforge/config.toml` and `JITFORGE_CONFIG` are also supported. On Unix, a configuration file containing tokens or API keys must have mode `0600`.
 
-## Web 与公开路由
+## Web Console and Gateway Routes
 
-完整 Compose Profile 由 Nginx 提供统一入口：
+The complete Compose profile exposes one Nginx entry point:
 
 ```text
-/                              307 跳转到 /ui/
+/                              307 redirect to /ui/
 /ui/                           Web Console
 /v1/                           HTTP API
-/healthz                       进程健康状态
-/readyz                        PostgreSQL 与 Worker 就绪状态
+/healthz                       process health
+/readyz                        PostgreSQL and Worker readiness
 ```
 
-Console 支持登录、能力列表与详情、注册、任务处理、调用、撤销、HTTP Capability 和系统状态。浏览器使用 HttpOnly、SameSite=Strict Session Cookie，写请求还需匹配 `X-JitForge-Csrf`。
+The Console supports login, capability listing and inspection, registration, job handling, invocation, revocation, HTTP Capability management, and system status. Browsers use an HttpOnly, SameSite=Strict session cookie; mutating requests must also provide the matching `X-JitForge-Csrf` token.
 
-## 合成与发布
+## Synthesis and Publication
 
-合成 Agent 使用受控的原生 tool calls，每个模型轮次只接受一个动作。当前单任务硬上限包括 24 个模型轮次、4 个源码 Revision、3 次生成测试纠错和 3 次 Sandbox Probe；Web 搜索与 HTTP Probe 也有独立预算。
+The synthesis Agent uses constrained native tool calls and accepts one action per model turn. Current per-job limits include 24 model turns, 4 source revisions, 3 generated-test corrections, and 3 sandbox probes. Web searches and HTTP probes have separate budgets.
 
-典型流程如下：
+A typical job proceeds as follows:
 
-1. 根据 Intent、Input Sample 和 Strict Example 生成 Contract 与测试计划；
-2. 独立 Reviewer 检查需求漂移、错误 Oracle 和样本硬编码；
-3. Contract 通过后才允许生成或编辑 Python 源码；
-4. Runner 在 runsc 中执行输入样本、用户测试、生成测试和 Probe；
-5. 任务可以暂停等待澄清、示例修正或 HTTP Capability 审批，并从 Checkpoint 恢复；
-6. 全部门槛通过后写入内容寻址 Artifact，发布不可变 Revision 并更新 stable 指针。
+1. Derive a Contract and test plan from the Intent, Input Sample, and Strict Examples.
+2. Run an independent review for requirement drift, invalid oracles, and sample hard-coding.
+3. Permit source generation or editing only after the Contract passes review.
+4. Execute input samples, user tests, generated tests, and probes through the runsc Runner.
+5. Pause for clarification, example correction, or HTTP Capability approval when required, then resume from a checkpoint.
+6. Store a content-addressed artifact, publish an immutable revision, and update the `stable` pointer only after every gate passes.
 
-## HTTP Capability
+## HTTP Capabilities
 
-能力默认无网络。确实需要公共实时数据时，合成 Agent 可以申请精确的 HTTPS GET 权限，范围由 Host、443 端口、Path Prefix 和允许的 Query Keys 共同确定。
+Capabilities have no network access by default. When current public data is genuinely required, the synthesis Agent may request a narrowly scoped HTTPS GET grant defined by host, port 443, path prefix, and allowed query keys.
 
-用户批准后，Grant 会随 Artifact 发布。运行时只允许生成代码通过 `jitforge_http.get` 访问匹配范围；IP 字面量、私网解析、凭据 URL、任意端口和原始 Socket 都会被拒绝。Approval 被撤销后，引用它的 Artifact 会停止联网调用。
+After user approval, the grant is published with the artifact. The runtime policy permits generated code to call matching destinations through `jitforge_http.get`; IP literals, private address resolution, credential-bearing URLs, arbitrary ports, and raw socket access are rejected. Revoking an approval prevents artifacts that reference it from making further networked calls.
 
-启用实时 HTTP 还需要部署者显式设置：
+Live HTTP access also requires an explicit deployment setting:
 
 ```dotenv
 JITFORGE_HTTP_MODE=direct
 ```
 
-不需要联网能力时保持默认的 `disabled`。
+Leave the default `disabled` mode in place when networked capabilities are unnecessary. Direct mode relies on the runtime policy and sandbox as defense in depth; it is not a formal security boundary against deliberately hostile generated code.
 
-## 安全边界
+## Security Boundaries
 
-生成能力通过 Docker + runsc 执行，当前 Runner 约束包括：
+Generated capabilities run through Docker and runsc with the following controls:
 
-- UID/GID 65532，read-only rootfs；
-- `cap-drop=ALL` 与 `no-new-privileges`；
-- `/tmp` 为 32 MiB、`noexec` 的 tmpfs；
-- 128 MiB 内存、0.5 CPU、16 个进程和 64 个文件描述符；
-- stdout/stderr 各 1 MiB 上限和硬超时；
-- 默认 `network=none`。
+- UID/GID 65532 and a read-only root filesystem;
+- `cap-drop=ALL` and `no-new-privileges`;
+- a 32 MiB `noexec` tmpfs at `/tmp`;
+- 128 MiB of memory, 0.5 CPU, 16 processes, and 64 file descriptors;
+- 1 MiB limits for stdout and stderr plus a hard timeout;
+- `network=none` by default.
 
-这些限制只约束生成能力的 Runner，不代表 Server、Worker 和 Nginx 容器都具有同样的只读配置。`runsc` 是隔离层，不是完整安全证明；Worker 挂载 Docker Socket，仍然是高权限边界。
+These controls apply to generated capability containers, not necessarily to the Server, Worker, and Nginx containers. `runsc` is an isolation layer, not a complete security proof. The Worker mounts the Docker socket and remains a privileged trust boundary.
 
-当前认证模型是单个共享 Bearer Token。Compose 中 PostgreSQL 的默认账号密码只适合本地开发，部署时必须覆盖。Server 只提供 HTTP，公网入口需要独立的 TLS 终止层；当前 `0.1.0` 的 Web Session Cookie 尚未设置 `Secure`，修复前不要把 Console 直接暴露到不受信任网络。
+Authentication currently uses one shared Bearer token. The PostgreSQL credentials in Compose are development defaults and must be replaced for deployment. The Server provides HTTP only, so an external TLS terminator is required for public access. In `0.1.0`, the Web session cookie does not yet carry the `Secure` attribute; do not expose the Console directly to an untrusted network until that is addressed.
 
-## 仓库结构
+## Repository Layout
 
 ```text
 apps/jit-cli              Rust CLI
-apps/jit-server           HTTP API、Session/CSRF、Registry 控制面、内嵌 Console
-apps/jit-worker           合成 Agent、Verifier、Runner 与发布流程
-crates/jit-*              Artifact、Config、Domain、Protocol、Storage
-web/console               编译进 jit-server 的 HTML/CSS/JS
-runtimes/python-stdlib-v2 生成能力的固定 Python Runtime
-deployments               Compose、Nginx 与 SearXNG 配置
+apps/jit-server           HTTP API, Session/CSRF, Registry control plane, embedded Console
+apps/jit-worker           synthesis Agent, Verifier, Runner, and publication pipeline
+crates/jit-*              Artifact, Config, Domain, Protocol, and Storage crates
+web/console               HTML/CSS/JS embedded into jit-server
+runtimes/python-stdlib-v2 fixed Python runtime for generated capabilities
+deployments               Compose, Nginx, and SearXNG configuration
 migrations                PostgreSQL migrations
 ```
 
-## 开发检查
+## Development Checks
 
 ```bash
 cargo fmt --all --check
@@ -261,7 +261,7 @@ JITFORGE_TOKEN=test JITFORGE_WORKER_TOKEN=worker-test \
   docker compose --profile containerized config --quiet
 ```
 
-日常开发可以只用 Compose 启动 PostgreSQL、SearXNG 和 Runtime Image，再在宿主机分别运行 Worker 与 Server：
+For day-to-day development, start only PostgreSQL, SearXNG, and the runtime images with Compose, then run the Worker and Server on the host:
 
 ```bash
 docker compose up --build -d
@@ -270,7 +270,7 @@ JITFORGE_WORKER_TOKEN=worker-test \
   cargo run -p jit-worker
 ```
 
-另一个终端：
+In another terminal:
 
 ```bash
 JITFORGE_TOKEN=client-test \
@@ -278,8 +278,10 @@ JITFORGE_TOKEN=client-test \
   cargo run -p jit-server
 ```
 
-## 项目状态
+## Project Status
 
-JITForge 正在从完整原型整理为可公开发布的开源项目。API、Artifact Format 和部署方式在 `0.1.x` 阶段仍可能变化。
+JITForge is an alpha project. The API, artifact format, configuration, and deployment model may change throughout the `0.1.x` series.
 
-仓库目前尚未加入开源许可证。正式公开或接受外部贡献前，需要先确定许可证并添加 `LICENSE`。
+## License
+
+JITForge is licensed under the [GNU Affero General Public License v3.0](LICENSE), using the SPDX identifier `AGPL-3.0-only`.
